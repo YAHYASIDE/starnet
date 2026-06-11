@@ -44,6 +44,7 @@ const DIAL_CODES = [
   { n: "موريتانيا", c: "+222" },
   { n: "مالي", c: "+223" },
   { n: "الجزائر", c: "+213" },
+  { n: "النيجر", c: "+227" },
 ];
 
 // كل دول العالم (الاسم بالعربية + رمز العملة) — تُرتّب أبجدياً عند العرض
@@ -1035,6 +1036,57 @@ function Countdown({ endDate, broken, compact }) {
 /* ============================================================
    لوحة التحكم
    ============================================================ */
+function QuickLookup({ data, onWhats }) {
+  const [q, setQ] = useState("");
+  const t = todayStr();
+  const results = useMemo(() => {
+    const s = q.trim().toLowerCase();
+    if (!s) return [];
+    return data.devices
+      .filter((d) => `${d.customerName} ${d.phone} ${d.email} ${d.accountNumber}`.toLowerCase().includes(s))
+      .sort((a, b) => diffDays(t, a.endDate) - diffDays(t, b.endDate))
+      .slice(0, 6);
+  }, [q, data.devices]);
+  return (
+    <section className="sn-block">
+      <h2>🔎 بحث سريع (للردّ على الزبون)</h2>
+      <input
+        className="sn-lookup-input"
+        dir="ltr"
+        placeholder="الصق إيميل الزبون أو رقمه…"
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+      />
+      {q.trim() && results.length === 0 && <p className="sn-muted-txt">لا يوجد زبون مطابق.</p>}
+      {results.map((d) => {
+        const s = statusOf(d);
+        const dd = diffDays(t, d.endDate);
+        const statusTxt = d.broken
+          ? "معطّل"
+          : s.key === "expired"
+          ? `منتهٍ منذ ${Math.abs(dd)} يوم`
+          : dd === 0
+          ? "ينتهي اليوم"
+          : `نشط — يتبقّى ${dd} يوم`;
+        return (
+          <div className="sn-lookup-row" key={d.id}>
+            <div className="sn-lookup-info">
+              <span className="sn-lookup-name">{d.customerName}</span>
+              <span className={"sn-lookup-status sn-st-" + s.key}>
+                {statusTxt}{d.debt > 0 ? ` • عليه ${money(d.debt)}` : ""}
+              </span>
+              <span className="sn-lookup-email" dir="ltr">{d.email || "—"}</span>
+            </div>
+            <button className="sn-btn sn-btn--primary sn-lookup-send" onClick={() => onWhats(d, "reminder")}>
+              📤 إرسال الحالة
+            </button>
+          </div>
+        );
+      })}
+    </section>
+  );
+}
+
 function Dashboard({ data, settings, toBase, onRenew, onMarkPaid, onBroken, onClearDebt, onWhats, onAdd, goDevices }) {
   const t = todayStr();
   const stats = useMemo(() => {
@@ -1091,6 +1143,8 @@ function Dashboard({ data, settings, toBase, onRenew, onMarkPaid, onBroken, onCl
         <Stat n={stats.urgent} label="تنتهي خلال 24س" cls="warn" />
         <Stat n={stats.expired} label="منتهية" cls="bad" />
       </section>
+
+      <QuickLookup data={data} onWhats={onWhats} />
 
       {stats.debtBase > 0 && (
         <div className="sn-debt-banner" onClick={goDevices}>
@@ -1845,6 +1899,43 @@ function DeviceForm({ initial, settings, devices = [], agents = [], countries = 
   };
 
   const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
+
+  // قاعدة العملاء: كل عميل فريد بآخر جهاز له (لاستعادة بياناته)
+  const [showSug, setShowSug] = useState(false);
+  const customers = useMemo(() => {
+    const map = {};
+    (devices || []).forEach((d) => {
+      const key = (d.customerName || "").trim();
+      if (!key) return;
+      const prev = map[key];
+      if (!prev || (d.createdAt || "") > (prev.createdAt || "")) map[key] = d;
+    });
+    return Object.values(map).sort((a, b) => (a.customerName || "").localeCompare(b.customerName || "", "ar"));
+  }, [devices]);
+  const nameMatches = useMemo(() => {
+    const s = (f.customerName || "").trim().toLowerCase();
+    if (!s) return customers.slice(0, 8);
+    return customers.filter((d) => (d.customerName || "").toLowerCase().includes(s)).slice(0, 8);
+  }, [f.customerName, customers]);
+  const applyCustomer = (d) => {
+    setF((p) => ({
+      ...p,
+      customerName: d.customerName || p.customerName,
+      dialCode: d.dialCode || p.dialCode || "+222",
+      phone: d.phone || "",
+      email: d.email || "",
+      accountNumber: d.accountNumber || "",
+      wifiPassword: d.wifiPassword || "",
+      emailPassword: d.emailPassword || "",
+      country: d.country || "",
+      costLocal: d.costLocal ?? d.cost ?? "",
+      totalCustomer: d.totalCustomer ?? "",
+      currency: d.currency || "MRU",
+      payMethod: d.payMethod || "BANKILY",
+      agentId: d.agentId || "",
+    }));
+    setShowSug(false);
+  };
   const setCustomerMoney = (k, v) => setF((p) => recalcDebt({ ...p, [k]: v }));
   const setDebt = (v) => {
     setDebtManual(true);
@@ -1983,7 +2074,30 @@ function DeviceForm({ initial, settings, devices = [], agents = [], countries = 
         </div>
       )}
       <Field label="اسم العميل *">
-        <input value={f.customerName} onChange={(e) => set("customerName", e.target.value)} />
+        <div className="sn-autocomplete">
+          <input
+            value={f.customerName}
+            onChange={(e) => { set("customerName", e.target.value); setShowSug(true); }}
+            onFocus={() => setShowSug(true)}
+            placeholder="اكتب الاسم — تظهر أسماء العملاء السابقين"
+          />
+          {showSug && nameMatches.length > 0 && (
+            <div className="sn-sug-list">
+              <div className="sn-sug-head">
+                <span>عملاء سابقون ({nameMatches.length})</span>
+                <button type="button" className="sn-sug-close" onClick={() => setShowSug(false)}>✕</button>
+              </div>
+              {nameMatches.map((d) => (
+                <button type="button" className="sn-sug-item" key={d.id} onClick={() => applyCustomer(d)}>
+                  <span className="sn-sug-name">{d.customerName}</span>
+                  <span className="sn-sug-sub" dir="ltr">
+                    {[(d.dialCode || "") + " " + (d.phone || ""), d.email].map((x) => (x || "").trim()).filter(Boolean).join(" · ") || "—"}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       </Field>
       <Field label="رقم الهاتف (رمز الدولة تلقائي)">
         <div className="sn-phone-row">
@@ -3189,6 +3303,27 @@ const CSS = `
 .sn-photo img{width:100%;height:100%;object-fit:cover;display:block}
 .sn-photo-del{position:absolute;top:2px;inset-inline-end:2px;width:20px;height:20px;border-radius:50%;border:none;background:rgba(0,0,0,.6);color:#fff;font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}
 .sn-audio-row{display:flex;align-items:center;gap:8px;margin-top:6px}
+.sn-autocomplete{position:relative}
+.sn-sug-list{margin-top:6px;background:var(--surface2);border:1px solid var(--border);border-radius:12px;overflow:hidden;max-height:260px;overflow-y:auto}
+.sn-sug-head{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;font-size:11px;font-weight:700;color:var(--muted);border-bottom:1px solid var(--border)}
+.sn-sug-close{background:none;border:none;color:var(--muted);font-size:14px;cursor:pointer;padding:0 4px}
+.sn-sug-item{display:flex;flex-direction:column;gap:2px;width:100%;text-align:right;background:none;border:none;border-bottom:1px solid var(--border);padding:10px 12px;cursor:pointer;font-family:inherit}
+.sn-sug-item:last-child{border-bottom:none}
+.sn-sug-item:active{background:var(--surface)}
+.sn-sug-name{font-weight:700;font-size:13.5px;color:var(--text)}
+.sn-sug-sub{font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sn-lookup-input{width:100%;margin-bottom:8px}
+.sn-lookup-row{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 0;border-bottom:1px dashed var(--border)}
+.sn-lookup-row:last-child{border-bottom:none}
+.sn-lookup-info{display:flex;flex-direction:column;gap:2px;min-width:0}
+.sn-lookup-name{font-weight:700;font-size:13.5px}
+.sn-lookup-status{font-size:11.5px;font-weight:700}
+.sn-lookup-email{font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px}
+.sn-st-active,.sn-st-soon{color:var(--ok)}
+.sn-st-urgent{color:var(--warn)}
+.sn-st-expired{color:var(--bad)}
+.sn-st-broken{color:var(--muted)}
+.sn-lookup-send{flex-shrink:0;padding:8px 12px;font-size:12px;width:auto}
 .sn-pay-apps{display:flex;flex-wrap:nowrap;gap:5px;overflow-x:auto}
 .sn-pay-app{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:7px 9px;font-family:inherit;font-size:11px;font-weight:700;color:var(--muted);cursor:pointer;white-space:nowrap;flex:1 0 auto}
 .sn-pay-app.is-on{background:var(--accent);color:#04122b;border-color:var(--accent)}
