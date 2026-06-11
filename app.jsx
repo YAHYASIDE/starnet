@@ -2760,6 +2760,7 @@ function ContactForm({ initial, agents = [], onCancel, onSave }) {
     currency: initial?.currency || "MRU",
     totalCustomer: initial?.totalCustomer ?? "",
     cost: initial?.cost ?? "",
+    costCurrency: initial?.costCurrency || "USDT",
     payMethod: initial?.payMethod || "BANKILY",
     agentId: initial?.agentId || "",
     note: initial?.note || "",
@@ -2802,14 +2803,19 @@ function ContactForm({ initial, agents = [], onCancel, onSave }) {
           ))}
         </select>
       </Field>
-      <div className="sn-grid2">
-        <Field label="سعر الشحن المعتاد (المطلوب)">
-          <input type="number" inputMode="decimal" value={c.totalCustomer} onChange={(e) => set("totalCustomer", e.target.value)} placeholder="بعملة الدفع" />
-        </Field>
-        <Field label="تكلفة الشحن ($) — اختياري">
-          <input type="number" inputMode="decimal" value={c.cost} onChange={(e) => set("cost", e.target.value)} placeholder="بالدولار" />
-        </Field>
-      </div>
+      <Field label="سعر الشحن المعتاد (المطلوب من الزبون)">
+        <input type="number" inputMode="decimal" value={c.totalCustomer} onChange={(e) => set("totalCustomer", e.target.value)} placeholder="بعملة الدفع المختارة أعلاه" />
+      </Field>
+      <Field label="تكلفة الشحن (للمورّد) — اختياري">
+        <div className="sn-phone-row">
+          <select className="sn-dial" value={c.costCurrency} onChange={(e) => set("costCurrency", e.target.value)}>
+            {CURRENCIES.map((cur) => (
+              <option key={cur.code} value={cur.code}>{cur.code}</option>
+            ))}
+          </select>
+          <input type="number" inputMode="decimal" value={c.cost} onChange={(e) => set("cost", e.target.value)} placeholder="مبلغ التكلفة" />
+        </div>
+      </Field>
       <Field label="المندوب">
         <select value={c.agentId} onChange={(e) => set("agentId", e.target.value)}>
           <option value="">— بدون مندوب —</option>
