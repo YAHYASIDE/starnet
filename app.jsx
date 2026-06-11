@@ -341,6 +341,7 @@ function StarNetApp() {
   const [editing, setEditing] = useState(null); // device | "new" | null
   const [renewing, setRenewing] = useState(null); // device | null
   const [collecting, setCollecting] = useState(null); // device being collected | null
+  const [payingSupplier, setPayingSupplier] = useState(null); // device being paid to supplier | null
   const [editingAgent, setEditingAgent] = useState(null); // agent | "new" | null
   const [editingCountry, setEditingCountry] = useState(null); // country | "new" | null
   const [editingContact, setEditingContact] = useState(null); // contact | "new" | null
@@ -545,16 +546,19 @@ function StarNetApp() {
   }
 
   function deleteDevice(device) {
-    setData((d) => {
-      const transactions = d.transactions.filter((t) => t.deviceId === device.id);
-      return {
-        ...d,
-        devices: d.devices.filter((x) => x.id !== device.id),
-        transactions: d.transactions.filter((t) => t.deviceId !== device.id),
-        trash: [{ device, transactions, deletedAt: todayStr() }, ...(d.trash || [])],
-      };
+    setConfirm({
+      text: `حذف جهاز «${device.customerName || "بدون اسم"}»؟ سيُنقل إلى سلة المحذوفات ويمكن استعادته.`,
+      onYes: () => {
+        setData((d) => ({
+          ...d,
+          devices: d.devices.filter((x) => x.id !== device.id),
+          transactions: d.transactions.filter((t) => t.deviceId !== device.id),
+          trash: [{ device, transactions: d.transactions.filter((t) => t.deviceId === device.id), deletedAt: todayStr() }, ...(d.trash || [])],
+        }));
+        flash("نُقل إلى سلة المحذوفات 🗑️");
+        setConfirm(null);
+      },
     });
-    flash("نُقل إلى سلة المحذوفات 🗑️");
   }
   function restoreTrash(item) {
     setData((d) => ({
@@ -629,6 +633,39 @@ function StarNetApp() {
       };
     });
     flash(paid ? "تم تسجيل دفعك للمورّد ✅" : "أُلغي الدفع للمورّد");
+  }
+
+  // عند الضغط على «دفعت للمورّد»: نفتح نافذة تأكيد المبلغ والتاريخ. الإلغاء فوري.
+  function handleMarkPaid(device, paid = true) {
+    if (paid) setPayingSupplier(device);
+    else markCostPaid(device, false);
+  }
+  function confirmSupplierPay(device, info) {
+    const amt = Number(info.amount) || 0;
+    setData((d) => {
+      let transactions = [...d.transactions];
+      const idx = transactions.findIndex((t) => t.deviceId === device.id && t.type === "دفع للمورّد");
+      if (idx >= 0) transactions.splice(idx, 1); // تفادي التكرار
+      if (amt > 0) {
+        transactions.unshift({
+          id: uid(),
+          deviceId: device.id,
+          customerName: device.customerName,
+          date: info.date || todayStr(),
+          amount: amt,
+          currency: "USDT",
+          isExpense: true,
+          type: "دفع للمورّد",
+        });
+      }
+      return {
+        ...d,
+        transactions,
+        devices: d.devices.map((x) => (x.id === device.id ? { ...x, costPaid: true, cost: amt } : x)),
+      };
+    });
+    flash("تم تسجيل الدفع للمورّد ✅");
+    setPayingSupplier(null);
   }
 
   // تعطّل الجهاز: لا نخسر شيئاً لأننا لم ندفع التكلفة للمورّد بعد
@@ -924,7 +961,7 @@ function StarNetApp() {
             settings={settings}
             toBase={toBase}
             onRenew={setRenewing}
-            onMarkPaid={markCostPaid}
+            onMarkPaid={handleMarkPaid}
             onBroken={markBroken}
             onClearDebt={clearDebt}
             onWhats={(dev, kind) => openWhatsApp(dev, kind, settings, customerBalance(dev, data, settings.rates))}
@@ -939,7 +976,7 @@ function StarNetApp() {
             onRenew={setRenewing}
             onDelete={deleteDevice}
             onClearDebt={clearDebt}
-            onMarkPaid={markCostPaid}
+            onMarkPaid={handleMarkPaid}
             onBroken={markBroken}
             onUnbreak={unBreak}
             onCopy={handleCopy}
@@ -1092,6 +1129,13 @@ function StarNetApp() {
           device={collecting}
           onCancel={() => setCollecting(null)}
           onConfirm={confirmCollect}
+        />
+      )}
+      {payingSupplier && (
+        <SupplierPaySheet
+          device={payingSupplier}
+          onCancel={() => setPayingSupplier(null)}
+          onConfirm={confirmSupplierPay}
         />
       )}
       {confirm && (
@@ -1668,6 +1712,46 @@ function Devices({ data, onEdit, onRenew, onDelete, onClearDebt, onMarkPaid, onB
   );
 }
 
+// أيقونة صغيرة تتطلّب ضغطاً مطوّلاً (ثانية) قبل التنفيذ
+function HoldIcon({ icon, title, onHold, danger }) {
+  const [p, setP] = useState(0);
+  const raf = useRef(null);
+  const start = useRef(0);
+  const stop = () => {
+    if (raf.current) cancelAnimationFrame(raf.current);
+    raf.current = null;
+    setP(0);
+  };
+  const begin = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    start.current = Date.now();
+    const tick = () => {
+      const pr = Math.min(1, (Date.now() - start.current) / 1000);
+      setP(pr);
+      if (pr >= 1) { stop(); onHold(); }
+      else raf.current = requestAnimationFrame(tick);
+    };
+    raf.current = requestAnimationFrame(tick);
+  };
+  return (
+    <button
+      type="button"
+      className={"sn-quick-btn" + (danger ? " sn-quick-del" : "")}
+      title={title}
+      aria-label={title}
+      onClick={(e) => e.stopPropagation()}
+      onPointerDown={begin}
+      onPointerUp={stop}
+      onPointerLeave={stop}
+      onPointerCancel={stop}
+      style={p > 0 ? { background: `conic-gradient(${danger ? "#f43f5e" : "var(--accent)"} ${p * 360}deg, var(--surface2) 0)` } : undefined}
+    >
+      {icon}
+    </button>
+  );
+}
+
 function DeviceCard({ d, agents = [], countries = [], balance, compact = false, dupReasons = [], onEdit, onRenew, onDelete, onClearDebt, onMarkPaid, onBroken, onUnbreak, onCopy, onExport, onWhats }) {
   const [open, setOpen] = useState(false);
   const s = statusOf(d);
@@ -1743,7 +1827,7 @@ function DeviceCard({ d, agents = [], countries = [], balance, compact = false, 
             {onEdit && <button className="sn-quick-btn" onClick={() => onEdit(d)} title="تعديل" aria-label="تعديل">✏️</button>}
             {onWhats && <button className="sn-quick-btn" onClick={() => onWhats(d, "reminder")} title="تذكير" aria-label="تذكير">⏰</button>}
             {onExport && <button className="sn-quick-btn" onClick={() => onExport(d)} title="PDF" aria-label="PDF">📄</button>}
-            {onDelete && <button className="sn-quick-btn sn-quick-del" onClick={() => onDelete(d)} title="حذف" aria-label="حذف">🗑️</button>}
+            {onDelete && <HoldIcon icon="🗑️" title="حذف (اضغط مطوّلاً)" danger onHold={() => onDelete(d)} />}
           </div>
           <span className={"sn-badge sn-badge--" + s.key}>{s.label}</span>
           <Countdown endDate={d.endDate} broken={d.broken} compact />
@@ -2716,6 +2800,42 @@ function PaymentSheet({ device, onCancel, onConfirm }) {
   );
 }
 
+function SupplierPaySheet({ device, onCancel, onConfirm }) {
+  const [amount, setAmount] = useState(device.cost || "");
+  const [date, setDate] = useState(todayStr());
+  const expected = Number(device.cost) || 0;
+  const matches = Number(amount) === expected;
+  return (
+    <Sheet title={`الدفع للمورّد — ${device.customerName}`} onClose={onCancel}>
+      <div className="sn-end-preview">
+        المبلغ المفترض للمورّد على هذا الجهاز: <strong>${money(expected)}</strong>
+      </div>
+      <Field label="المبلغ المدفوع للمورّد (بالدولار $)">
+        <input type="number" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} />
+      </Field>
+      {!matches && Number(amount) > 0 && (
+        <p className="sn-hint" style={{ color: "#fbbf24" }}>
+          ⚠️ المبلغ ({money(Number(amount))}$) يختلف عن المفترض ({money(expected)}$). سيُعتمد المبلغ الذي أدخلته.
+        </p>
+      )}
+      <Field label="تاريخ الدفع للمورّد">
+        <input type="date" lang="en-GB" value={date} onChange={(e) => setDate(e.target.value)} />
+      </Field>
+      <p className="sn-hint">تأكّد أن المبلغ بالدولار صحيح ومطابق لما دفعته فعلاً. يُسجَّل مصروفاً بهذا التاريخ.</p>
+      <div className="sn-sheet-actions">
+        <button className="sn-btn sn-btn--ghost" onClick={onCancel}>إلغاء</button>
+        <button
+          className="sn-btn sn-btn--primary"
+          disabled={!(Number(amount) > 0)}
+          onClick={() => onConfirm(device, { amount, date })}
+        >
+          ✅ تأكيد الدفع للمورّد
+        </button>
+      </div>
+    </Sheet>
+  );
+}
+
 function RenewForm({ device, settings, countries = [], onSaveRate, onCancel, onConfirm }) {
   const [info, setInfo] = useState({
     date: todayStr(),
@@ -3631,7 +3751,7 @@ const CSS = `
 .sn-menu-btn{position:absolute;top:18px;left:16px;z-index:2;width:42px;height:42px;border-radius:12px;border:1px solid rgba(255,255,255,.15);background:rgba(255,255,255,.08);color:#fff;font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
 .sn-hbtn{position:absolute;top:18px;z-index:2;width:44px;height:44px;border-radius:50%;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.10);color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px);font-size:21px;line-height:1;padding:0}
 .sn-hbtn:active{transform:scale(.93)}
-.sn-menu-btn.sn-hbtn{left:16px;border-radius:50%;width:44px;height:44px}
+.sn-menu-btn.sn-hbtn{left:16px;border-radius:50%;width:44px;height:44px;background:linear-gradient(135deg,#22d3ee,#3b82f6);border-color:transparent;box-shadow:0 4px 14px rgba(56,189,248,.4);font-size:19px}
 .sn-add-btn{right:16px;font-size:30px;font-weight:300;background:linear-gradient(135deg,#6f8bff,#8b5cf6);border-color:transparent;box-shadow:0 4px 14px rgba(120,120,255,.4)}
 .sn-brand{justify-content:center;text-align:center;padding:0 54px}
 .sn-drawer-wrap{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.55);display:flex;justify-content:flex-start;animation:snFade .15s ease}
