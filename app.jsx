@@ -195,6 +195,9 @@ function sameCustomer(a, b) {
   const n = (s) => (s || "").trim().toLowerCase();
   if (n(a.customerName) && n(a.customerName) === n(b.customerName)) return true;
   if (n(a.email) && n(a.email) === n(b.email)) return true;
+  // ربط برقم الهاتف (مع رمز الدولة، أرقام فقط)
+  const ph = (x) => ((x.dialCode || "") + (x.phone || "")).replace(/\D/g, "");
+  if (ph(a) && ph(a) === ph(b)) return true;
   return false;
 }
 // الرصيد المجمّع للزبون (كل أجهزته): صافٍ بعملة الأساس. موجب = عليه دين، سالب = له رصيد.
@@ -312,6 +315,21 @@ async function persist(data) {
   }
 }
 
+// مواءمة الدخل: لكل جهاز غير مُجدَّد، دخله = المبلغ المدفوع فعلاً.
+// تزيل دفعات «تسديد دين» القديمة المنفصلة (التي كانت تسبّب ربحاً وهمياً بعد إلغاء الدفعات).
+function reconcileIncome(data) {
+  if (!data || !Array.isArray(data.transactions) || !Array.isArray(data.devices)) return data;
+  const renewed = new Set(data.transactions.filter((t) => t.type === "تجديد").map((t) => t.deviceId));
+  const txs = data.transactions.filter((t) => !(t.type === "تسديد دين" && !renewed.has(t.deviceId)));
+  data.devices.forEach((dev) => {
+    if (renewed.has(dev.id)) return; // الأجهزة المجدّدة لها دخل متعدّد الفترات — لا نلمسها
+    const paid = Math.round((Number(dev.amountPaid) || 0) * 100) / 100;
+    const idx = txs.findIndex((t) => t.deviceId === dev.id && t.type === "شحن");
+    if (idx >= 0) txs[idx] = { ...txs[idx], amount: paid };
+  });
+  return { ...data, transactions: txs };
+}
+
 /* ============================================================
    المكوّن الرئيسي
    ============================================================ */
@@ -336,7 +354,7 @@ function StarNetApp() {
     (async () => {
       const saved = await loadData();
       if (saved && saved.devices) {
-        setData({
+        setData(reconcileIncome({
           ...DEFAULT_DATA,
           ...saved,
           settings: { ...DEFAULT_DATA.settings, ...(saved.settings || {}) },
@@ -344,7 +362,7 @@ function StarNetApp() {
           countries: saved.countries && saved.countries.length ? saved.countries : DEFAULT_DATA.countries,
           trash: saved.trash || [],
           contacts: saved.contacts || [],
-        });
+        }));
       } else {
         setData(DEFAULT_DATA);
       }
@@ -416,28 +434,53 @@ function StarNetApp() {
           const idx = transactions.findIndex((tt) => tt.deviceId === form.id && tt.type === "دفع للمورّد");
           if (idx >= 0) transactions.splice(idx, 1);
         }
-        // مواءمة دخل الزبون: مجموع دخل هذا الجهاز = المبلغ المدفوع الجديد
-        const collected = transactions
-          .filter((tt) => tt.deviceId === form.id && tt.type === "تسديد دين")
-          .reduce((sum, tt) => sum + (Number(tt.amount) || 0), 0);
-        const base = Math.max(0, Math.round(((Number(form.amountPaid) || 0) - collected) * 100) / 100);
-        const inIdx = transactions.findIndex((tt) => tt.deviceId === form.id && tt.type === "شحن");
+        // مواءمة دخل الجهاز = المبلغ المدفوع فعلاً (إزالة دفعات الدين القديمة لمنع الربح الوهمي)
+        transactions = transactions.filter((tt) => !(tt.deviceId === form.id && tt.type === "تسديد دين"));
+        const paidNow = Math.round((Number(form.amountPaid) || 0) * 100) / 100;
+        const inIdx = transactions.findIndex((tt) => tt.deviceId === form.id && (tt.type === "تجديد" || tt.type === "شحن"));
         if (inIdx >= 0) {
-          transactions[inIdx] = { ...transactions[inIdx], amount: base, currency: form.currency, method: form.payMethod };
+          transactions[inIdx] = { ...transactions[inIdx], amount: paidNow, currency: form.currency, method: form.payMethod };
         } else {
           transactions.unshift({
             id: uid(),
             deviceId: form.id,
             customerName: dev.customerName,
             date: form.startDate,
-            amount: base,
+            amount: paidNow,
             currency: form.currency,
             method: form.payMethod,
             type: "شحن",
           });
         }
       }
-      return { ...d, devices, transactions };
+      // حفظ/تحديث العميل تلقائياً في دفتر العملاء
+      let contacts = d.contacts || [];
+      const cName = (form.customerName || "").trim();
+      if (cName) {
+        const cData = {
+          name: cName,
+          dialCode: form.dialCode || "+222",
+          phone: form.phone || "",
+          email: form.email || "",
+          accountNumber: form.accountNumber || "",
+          wifiPassword: form.wifiPassword || "",
+          emailPassword: form.emailPassword || "",
+          country: form.country || "",
+          currency: form.currency || "MRU",
+          totalCustomer: form.totalCustomer ?? "",
+          cost: form.cost ?? "",
+          costCurrency: form.costCurrency || "USDT",
+          payMethod: form.payMethod || "BANKILY",
+          agentId: form.agentId || "",
+        };
+        const ci = contacts.findIndex((c) => (c.name || "").trim().toLowerCase() === cName.toLowerCase());
+        if (ci >= 0) {
+          contacts = contacts.map((c, i) => (i === ci ? { ...c, ...cData } : c));
+        } else {
+          contacts = [...contacts, { ...cData, id: uid(), createdAt: todayStr(), note: "" }];
+        }
+      }
+      return { ...d, devices, transactions, contacts };
     });
     flash(isNew ? "تمت إضافة الجهاز ✅" : "تم حفظ التعديلات ✅");
     setEditing(null);
@@ -772,7 +815,21 @@ function StarNetApp() {
           newTx.push({ id: uid(), deviceId: dev.id, customerName: name, date: startDate, amount: cost, currency: "USDT", isExpense: true, type: "دفع للمورّد" });
         }
       });
-      return { ...d, devices: [...newDevices, ...d.devices], transactions: [...newTx, ...d.transactions] };
+      let contacts = d.contacts || [];
+      newDevices.forEach((dev) => {
+        const nm = (dev.customerName || "").trim();
+        if (!nm) return;
+        const cData = {
+          name: nm, dialCode: dev.dialCode || "+222", phone: dev.phone || "", email: dev.email || "",
+          accountNumber: dev.accountNumber || "", wifiPassword: dev.wifiPassword || "", emailPassword: dev.emailPassword || "",
+          country: dev.country || "", currency: dev.currency || "MRU", totalCustomer: dev.totalCustomer ?? "",
+          cost: dev.cost ?? "", costCurrency: dev.costCurrency || "USDT", payMethod: dev.payMethod || "BANKILY", agentId: dev.agentId || "",
+        };
+        const ci = contacts.findIndex((c) => (c.name || "").trim().toLowerCase() === nm.toLowerCase());
+        if (ci >= 0) contacts = contacts.map((c, i) => (i === ci ? { ...c, ...cData } : c));
+        else contacts = [...contacts, { ...cData, id: uid(), createdAt: todayStr(), note: "" }];
+      });
+      return { ...d, devices: [...newDevices, ...d.devices], transactions: [...newTx, ...d.transactions], contacts };
     });
     flash(`تم استيراد ${valid.length} جهازاً ✅`);
   }
@@ -3567,6 +3624,8 @@ const CSS = `
 @media (prefers-reduced-motion:reduce){.sn-stars,.sn-spinner{animation:none}}
 .sn-brand{position:relative;display:flex;align-items:center;gap:12px}
 .sn-logo{font-size:30px;filter:drop-shadow(0 0 8px rgba(255,209,102,.5))}
+.sn-logo-img{width:46px;height:46px;border-radius:50%;object-fit:cover;box-shadow:0 0 12px rgba(120,170,255,.45);border:1px solid rgba(255,255,255,.18);flex-shrink:0}
+.sn-drawer-head .sn-logo-img{width:50px;height:50px}
 .sn-brand h1{font-size:21px;font-weight:800;letter-spacing:.5px}
 .sn-brand p{font-size:12.5px;color:var(--muted);margin-top:2px}
 .sn-menu-btn{position:absolute;top:18px;left:16px;z-index:2;width:42px;height:42px;border-radius:12px;border:1px solid rgba(255,255,255,.15);background:rgba(255,255,255,.08);color:#fff;font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
