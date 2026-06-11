@@ -38,7 +38,13 @@ function originLabel(code) {
 }
 
 // تطبيقات الدفع المتاحة
-const PAYMENT_APPS = ["BANKILY", "KACH", "ORANJ", "NITA", "نقداً", "أخرى"];
+const PAYMENT_APPS = ["BANKILY", "KACH", "ORANJ", "NITA", "أخرى"];
+// رموز الدول التي نتعامل معها
+const DIAL_CODES = [
+  { n: "موريتانيا", c: "+222" },
+  { n: "مالي", c: "+223" },
+  { n: "الجزائر", c: "+213" },
+];
 
 // كل دول العالم (الاسم بالعربية + رمز العملة) — تُرتّب أبجدياً عند العرض
 const WORLD_COUNTRIES = [
@@ -882,7 +888,7 @@ function openWhatsApp(device, kind, settings, balance) {
     .replaceAll("{debt}", debtText)
     .replaceAll("{creditline}", creditLine)
     .replaceAll("{credit}", creditText);
-  const num = (device.phone || "").replace(/[^\d]/g, "");
+  const num = ((device.dialCode || "") + (device.phone || "")).replace(/[^\d]/g, "");
   const url = `https://wa.me/${num}?text=${encodeURIComponent(msg)}`;
   try {
     window.open(url, "_blank");
@@ -1431,7 +1437,7 @@ function DeviceCard({ d, agents = [], countries = [], balance, compact = false, 
       {open && (
         <div className="sn-card-body">
           <Row k="الاسم" v={d.customerName} onCopy={onCopy} copyLabel="الاسم" />
-          <Row k="رقم الهاتف" v={d.phone} onCopy={onCopy} copyLabel="رقم الهاتف" />
+          <Row k="رقم الهاتف" v={`${d.dialCode || ""} ${d.phone || ""}`.trim()} onCopy={onCopy} copyLabel="رقم الهاتف" />
           <Row k="البريد الإلكتروني" v={d.email} onCopy={onCopy} copyLabel="البريد" />
           <Row k="رقم الحساب" v={d.accountNumber} onCopy={onCopy} copyLabel="رقم الحساب" />
           <Row k="كلمة مرور الواي فاي" v={d.wifiPassword} onCopy={onCopy} copyLabel="مرور الواي فاي" />
@@ -1610,6 +1616,7 @@ function Reports({ data, toBase, settings }) {
     });
     return Object.entries(map).sort((a, b) => b[1] - a[1]);
   }, [data.devices]);
+  const [showEmails, setShowEmails] = useState(false);
 
   // المعاملات مجمّعة لكل زبون (كي لا تختلط)
   const grouped = useMemo(() => {
@@ -1700,11 +1707,13 @@ function Reports({ data, toBase, settings }) {
       </section>
 
       <section className="sn-block">
-        <div className="sn-sec-head">
-          <h2>الإيميلات</h2>
+        <div className="sn-sec-head" onClick={() => setShowEmails((s) => !s)} style={{ cursor: "pointer" }}>
+          <h2>الإيميلات {showEmails ? "▾" : "▸"}</h2>
           <span className="sn-count">{emails.length}</span>
         </div>
-        {emails.length === 0 ? (
+        {!showEmails ? (
+          <p className="sn-muted-txt">اضغط لعرض كل الإيميلات.</p>
+        ) : emails.length === 0 ? (
           <p className="sn-muted-txt">لا توجد إيميلات بعد.</p>
         ) : (
           emails.map(([e, n]) => (
@@ -1764,6 +1773,7 @@ function DeviceForm({ initial, settings, devices = [], agents = [], countries = 
     initial
       ? {
           ...initial,
+          dialCode: initial.dialCode || "+222",
           emailPassword: initial.emailPassword || "",
           country: initial.country || "",
           costLocal: initial.costLocal ?? initial.cost ?? "",
@@ -1781,6 +1791,7 @@ function DeviceForm({ initial, settings, devices = [], agents = [], countries = 
         }
       : {
           customerName: "",
+          dialCode: "+222",
           phone: "",
           email: "",
           accountNumber: "",
@@ -1974,14 +1985,21 @@ function DeviceForm({ initial, settings, devices = [], agents = [], countries = 
       <Field label="اسم العميل *">
         <input value={f.customerName} onChange={(e) => set("customerName", e.target.value)} />
       </Field>
-      <Field label="رقم الهاتف (مع رمز الدولة)">
-        <input
-          type="tel"
-          dir="ltr"
-          placeholder="+222..."
-          value={f.phone}
-          onChange={(e) => set("phone", e.target.value)}
-        />
+      <Field label="رقم الهاتف (رمز الدولة تلقائي)">
+        <div className="sn-phone-row">
+          <select className="sn-dial" value={f.dialCode || "+222"} onChange={(e) => set("dialCode", e.target.value)}>
+            {DIAL_CODES.map((d) => (
+              <option key={d.c} value={d.c}>{d.c} {d.n}</option>
+            ))}
+          </select>
+          <input
+            type="tel"
+            dir="ltr"
+            placeholder="رقم الزبون"
+            value={f.phone}
+            onChange={(e) => set("phone", e.target.value)}
+          />
+        </div>
       </Field>
       <Field label="البريد الإلكتروني (حساب ستارلينك)">
         <input dir="ltr" value={f.email} onChange={(e) => set("email", e.target.value)} />
@@ -2119,7 +2137,7 @@ function DeviceForm({ initial, settings, devices = [], agents = [], countries = 
         <input value={f.originNote} onChange={(e) => set("originNote", e.target.value)} placeholder="مثال: جاءنا بدين 5$ سابق ودفعناه" />
       </Field>
 
-      <Field label="المندوب (اختياري — من جلب هذا العميل)">
+      <Field label="المندوب">
         <select value={f.agentId} onChange={(e) => set("agentId", e.target.value)}>
           <option value="">— بدون مندوب —</option>
           {agents.map((a) => (
@@ -2128,11 +2146,22 @@ function DeviceForm({ initial, settings, devices = [], agents = [], countries = 
         </select>
       </Field>
 
-      <div className="sn-notes-head">
-        <span>ملاحظات</span>
-        <button type="button" className="sn-add-note" onClick={addNote}>+ إضافة ملاحظة</button>
+      <div className="sn-media-bar">
+        <button type="button" className="sn-icon-btn" onClick={addNote} title="إضافة ملاحظة">📝</button>
+        <button type="button" className="sn-icon-btn" disabled={(f.photos || []).length >= 4} onClick={() => photoInput.current?.click()} title="إضافة صورة">📷</button>
+        {!recording ? (
+          <button type="button" className="sn-icon-btn" onClick={startRec} title="تسجيل صوت">🎙️</button>
+        ) : (
+          <button type="button" className="sn-icon-btn sn-rec" onClick={stopRec} title="إيقاف التسجيل">⏹️</button>
+        )}
+        <button type="button" className="sn-icon-btn" onClick={() => audioInput.current?.click()} title="رفع ملف صوتي">📁</button>
+        {f.agentId && (() => { const ag = agents.find((a) => a.id === f.agentId); return ag ? (
+          <span className="sn-icon-agent" title={"المندوب: " + ag.name} style={{ background: ag.color || "var(--accent)" }}>🤝</span>
+        ) : null; })()}
       </div>
-      {f.notes.length === 0 && <p className="sn-hint">لا توجد ملاحظات. اضغط «إضافة ملاحظة».</p>}
+      <input ref={photoInput} type="file" accept="image/*" multiple hidden onChange={addPhotos} />
+      <input ref={audioInput} type="file" accept="audio/*" hidden onChange={uploadAudio} />
+
       {f.notes.map((n, i) => (
         <div className="sn-note-row" key={i}>
           <input value={n} placeholder={`ملاحظة ${i + 1}`} onChange={(e) => setNote(i, e.target.value)} />
@@ -2140,13 +2169,6 @@ function DeviceForm({ initial, settings, devices = [], agents = [], countries = 
         </div>
       ))}
 
-      <div className="sn-notes-head">
-        <span>صور الملاحظة ({(f.photos || []).length}/4)</span>
-        {(f.photos || []).length < 4 && (
-          <button type="button" className="sn-add-note" onClick={() => photoInput.current?.click()}>📷 إضافة صورة</button>
-        )}
-      </div>
-      <input ref={photoInput} type="file" accept="image/*" multiple hidden onChange={addPhotos} />
       {(f.photos || []).length > 0 && (
         <div className="sn-photos">
           {(f.photos || []).map((src, i) => (
@@ -2158,19 +2180,7 @@ function DeviceForm({ initial, settings, devices = [], agents = [], countries = 
         </div>
       )}
 
-      <div className="sn-notes-head">
-        <span>مقطع صوتي</span>
-        <div style={{ display: "flex", gap: 6 }}>
-          {!recording ? (
-            <button type="button" className="sn-add-note" onClick={startRec}>🎙️ تسجيل</button>
-          ) : (
-            <button type="button" className="sn-add-note" style={{ color: "#fb7185", borderColor: "#fb7185" }} onClick={stopRec}>⏹️ إيقاف</button>
-          )}
-          <button type="button" className="sn-add-note" onClick={() => audioInput.current?.click()}>📁 رفع</button>
-        </div>
-      </div>
-      <input ref={audioInput} type="file" accept="audio/*" hidden onChange={uploadAudio} />
-      {recording && <p className="sn-hint" style={{ color: "#fb7185" }}>● جارٍ التسجيل… اضغط «إيقاف» عند الانتهاء.</p>}
+      {recording && <p className="sn-hint" style={{ color: "#fb7185" }}>● جارٍ التسجيل… اضغط ⏹️ عند الانتهاء.</p>}
       {recErr && <p className="sn-hint" style={{ color: "#fb7185" }}>{recErr}</p>}
       {f.audio && (
         <div className="sn-audio-row">
@@ -2178,7 +2188,6 @@ function DeviceForm({ initial, settings, devices = [], agents = [], countries = 
           <button type="button" className="sn-note-del" onClick={() => set("audio", "")}>✕</button>
         </div>
       )}
-      <p className="sn-hint">تُضغط الصور تلقائياً لتوفير المساحة. النسخ الاحتياطي يحفظها معها.</p>
 
       <div className="sn-sheet-actions">
         <button className="sn-btn sn-btn--ghost" onClick={onCancel}>إلغاء</button>
@@ -3180,9 +3189,17 @@ const CSS = `
 .sn-photo img{width:100%;height:100%;object-fit:cover;display:block}
 .sn-photo-del{position:absolute;top:2px;inset-inline-end:2px;width:20px;height:20px;border-radius:50%;border:none;background:rgba(0,0,0,.6);color:#fff;font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}
 .sn-audio-row{display:flex;align-items:center;gap:8px;margin-top:6px}
-.sn-pay-apps{display:flex;flex-wrap:wrap;gap:7px}
-.sn-pay-app{background:var(--surface2);border:1px solid var(--border);border-radius:9px;padding:8px 12px;font-family:inherit;font-size:12.5px;font-weight:700;color:var(--muted);cursor:pointer}
+.sn-pay-apps{display:flex;flex-wrap:nowrap;gap:5px;overflow-x:auto}
+.sn-pay-app{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:7px 9px;font-family:inherit;font-size:11px;font-weight:700;color:var(--muted);cursor:pointer;white-space:nowrap;flex:1 0 auto}
 .sn-pay-app.is-on{background:var(--accent);color:#04122b;border-color:var(--accent)}
+.sn-phone-row{display:flex;gap:8px}
+.sn-dial{flex:0 0 auto;width:auto;min-width:96px}
+.sn-phone-row input{flex:1}
+.sn-media-bar{display:flex;gap:12px;align-items:center;margin:12px 0 6px}
+.sn-icon-btn{width:42px;height:42px;border-radius:50%;border:1.5px solid var(--border);background:var(--surface2);font-size:18px;line-height:1;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;flex-shrink:0}
+.sn-icon-btn:disabled{opacity:.4}
+.sn-icon-btn.sn-rec{border-color:#fb7185;color:#fb7185;animation:snPulse 1.2s ease-in-out infinite}
+.sn-icon-agent{width:42px;height:42px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px;margin-inline-start:auto;border:2px solid #fff3}
 .sn-notes-view>.sn-row-k{display:block;margin-bottom:6px}
 .sn-notes-view ul{list-style:none;display:flex;flex-direction:column;gap:6px}
 .sn-notes-view li{background:var(--surface2);border:1px solid var(--border);border-radius:9px;padding:8px 11px;font-size:13.5px;line-height:1.5;position:relative;padding-inline-start:24px}
