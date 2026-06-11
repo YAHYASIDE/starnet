@@ -499,10 +499,11 @@ function StarNetApp() {
         type: "تسديد دين",
       };
       const newDebt = Math.max(0, Math.round(((Number(device.debt) || 0) - amt) * 100) / 100);
+      const newPaid = Math.round(((Number(device.amountPaid) || 0) + amt) * 100) / 100;
       return {
         ...d,
         transactions: amt > 0 ? [tx, ...d.transactions] : d.transactions,
-        devices: d.devices.map((x) => (x.id === device.id ? { ...x, debt: newDebt } : x)),
+        devices: d.devices.map((x) => (x.id === device.id ? { ...x, debt: newDebt, amountPaid: newPaid } : x)),
       };
     });
     flash("تم تسجيل الدفع ✅");
@@ -2404,13 +2405,13 @@ function RenewForm({ device, settings, countries = [], onSaveRate, onCancel, onC
 /* ============================================================
    المندوبون (الوسطاء)
    ============================================================ */
-// ربح المندوب = مجموع (ما حصّلته فعلاً من الزبون − التكلفة) لأجهزته. يصبح سالباً إن حصّلت أقل من التكلفة.
+// ربح المندوب = (ما حصّلته فعلاً من الزبون) − (التكلفة المدفوعة للمورّد فقط). متسق مع حسابك النقدي.
 function agentProfit(agentId, data, toBase) {
   let profit = 0;
   (data.devices || []).forEach((d) => {
     if (d.agentId !== agentId || d.broken) return;
     const collected = toBase(Number(d.amountPaid) || 0, d.currency || "MRU");
-    const cost = toBase(Number(d.cost) || 0, "USDT");
+    const cost = d.costPaid ? toBase(Number(d.cost) || 0, d.costCurrency || "USDT") : 0;
     profit += collected - cost;
   });
   return Math.round(profit * 100) / 100;
@@ -2620,6 +2621,21 @@ function Settings({ settings, data, onSave, onAddCountry, onEditCountry, onDelet
     a.click();
     URL.revokeObjectURL(url);
   };
+  const shareData = async () => {
+    const json = JSON.stringify(data, null, 2);
+    const name = `starnet-backup-${todayStr()}.json`;
+    try {
+      const file = new File([json], name, { type: "application/json" });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: "نسخة STAR NET الاحتياطية" });
+        return;
+      }
+    } catch (e) { /* المستخدم ألغى أو غير مدعوم */ if (e && e.name === "AbortError") return; }
+    try {
+      if (navigator.share) { await navigator.share({ title: "نسخة STAR NET", text: json }); return; }
+    } catch (e) { if (e && e.name === "AbortError") return; }
+    exportData(); // احتياطي: تنزيل ملف
+  };
   const importData = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -2715,6 +2731,9 @@ function Settings({ settings, data, onSave, onAddCountry, onEditCountry, onDelet
           <button className="sn-btn sn-btn--ghost" onClick={exportData}>⬇️ تصدير ملف</button>
           <button className="sn-btn sn-btn--ghost" onClick={() => fileRef.current?.click()}>⬆️ استيراد ملف</button>
         </div>
+        <button className="sn-btn sn-btn--primary sn-full" style={{ marginTop: 10 }} onClick={shareData}>
+          📤 مشاركة النسخة الاحتياطية (إلى درايف…)
+        </button>
         <button
           className="sn-btn sn-btn--ghost sn-full"
           style={{ marginTop: 10 }}
@@ -2727,7 +2746,7 @@ function Settings({ settings, data, onSave, onAddCountry, onEditCountry, onDelet
         </button>
         <input ref={fileRef} type="file" accept="application/json" hidden onChange={importData} />
         <p className="sn-hint">
-          بياناتك تُحفظ تلقائياً داخل التطبيق وتبقى محفوظة عند إغلاقه. للحفظ على جوجل درايف: صدّر الملف أو انسخ النص وارفعه إلى درايف بنفسك (التطبيق لا يستطيع الرفع التلقائي إلى درايف). صدّر نسخة كل فترة للأمان.
+          بياناتك تُحفظ تلقائياً داخل التطبيق. للحفظ على جوجل درايف: اضغط «📤 مشاركة النسخة الاحتياطية» ثم اختر <strong>Google Drive</strong> من قائمة المشاركة. عند الحاجة، نزّل الملف من درايف واستورده. صدّر/شارك نسخة كل فترة للأمان (المزامنة التلقائية غير متاحة).
         </p>
       </section>
 
