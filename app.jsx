@@ -318,6 +318,7 @@ async function persist(data) {
 function StarNetApp() {
   const [data, setData] = useState(null);
   const [tab, setTab] = useState("dashboard");
+  const [drawer, setDrawer] = useState(false);
   const [editing, setEditing] = useState(null); // device | "new" | null
   const [renewing, setRenewing] = useState(null); // device | null
   const [collecting, setCollecting] = useState(null); // device being collected | null
@@ -772,6 +773,7 @@ function StarNetApp() {
       {/* الرأس */}
       <header className="sn-header">
         <div className="sn-stars" aria-hidden="true" />
+        <button className="sn-menu-btn" onClick={() => setDrawer(true)} aria-label="القائمة">☰</button>
         <div className="sn-brand">
           <span className="sn-logo">⭐</span>
           <div>
@@ -780,6 +782,53 @@ function StarNetApp() {
           </div>
         </div>
       </header>
+
+      {/* القائمة الجانبية */}
+      {drawer && (
+        <div className="sn-drawer-wrap" onClick={() => setDrawer(false)}>
+          <aside className="sn-drawer" onClick={(e) => e.stopPropagation()}>
+            <div className="sn-drawer-head">
+              <span className="sn-logo">⭐</span>
+              <div>
+                <h2>{settings.businessName}</h2>
+                <p>القائمة الرئيسية</p>
+              </div>
+            </div>
+            <div className="sn-drawer-list">
+              {[
+                ["dashboard", "🛰️", "الرئيسية"],
+                ["devices", "📋", `الأجهزة (${data.devices.length})`],
+                ["agents", "🤝", "المندوبون"],
+                ["reports", "📊", "التقارير والأرباح"],
+                ["settings", "⚙️", "الإعدادات"],
+              ].map(([k, ic, lbl]) => (
+                <button key={k} className={"sn-drawer-item" + (tab === k ? " is-active" : "")} onClick={() => { setTab(k); setDrawer(false); }}>
+                  <span className="sn-drawer-ic">{ic}</span>
+                  <span className="sn-drawer-lbl">{lbl}</span>
+                </button>
+              ))}
+              <div className="sn-drawer-sep" />
+              <button className="sn-drawer-item" onClick={() => { setTab("dashboard"); setEditing("new"); setDrawer(false); }}>
+                <span className="sn-drawer-ic">➕</span>
+                <span className="sn-drawer-lbl">إضافة جهاز جديد</span>
+              </button>
+              <button className="sn-drawer-item" onClick={() => { setTab("settings"); setEditingContact("new"); setDrawer(false); }}>
+                <span className="sn-drawer-ic">📒</span>
+                <span className="sn-drawer-lbl">إضافة عميل للدفتر</span>
+              </button>
+              <button className="sn-drawer-item" onClick={() => { setTab("settings"); setDrawer(false); }}>
+                <span className="sn-drawer-ic">📥</span>
+                <span className="sn-drawer-lbl">استيراد من Excel</span>
+              </button>
+              <button className="sn-drawer-item" onClick={() => { setTab("settings"); setDrawer(false); }}>
+                <span className="sn-drawer-ic">💱</span>
+                <span className="sn-drawer-lbl">العملات والنسخ الاحتياطي</span>
+              </button>
+            </div>
+            <p className="sn-drawer-foot">STAR NET ⭐</p>
+          </aside>
+        </div>
+      )}
 
       <main className="sn-main">
         {tab === "dashboard" && (
@@ -1262,10 +1311,10 @@ function Dashboard({ data, settings, toBase, onRenew, onMarkPaid, onBroken, onCl
       </section>
 
       <section className="sn-stats">
-        <Stat n={stats.total} label="إجمالي الأجهزة" cls="t" />
-        <Stat n={stats.active} label="نشطة" cls="ok" />
-        <Stat n={stats.urgent} label="تنتهي خلال 24س" cls="warn" />
-        <Stat n={stats.expired} label="منتهية" cls="bad" />
+        <Stat n={stats.total} label="إجمالي الأجهزة" cls="t" onClick={goDevices} />
+        <Stat n={stats.active} label="نشطة" cls="ok" onClick={goDevices} />
+        <Stat n={stats.urgent} label="تنتهي خلال 24س" cls="warn" onClick={goDevices} />
+        <Stat n={stats.expired} label="منتهية" cls="bad" onClick={goDevices} />
       </section>
 
       <QuickLookup data={data} onWhats={onWhats} />
@@ -1367,11 +1416,11 @@ function Dashboard({ data, settings, toBase, onRenew, onMarkPaid, onBroken, onCl
   );
 }
 
-function Stat({ n, label, cls }) {
+function Stat({ n, label, cls, onClick }) {
   return (
-    <div className={"sn-stat sn-stat--" + cls}>
+    <div className={"sn-stat sn-stat--" + cls + (onClick ? " sn-stat--tap" : "")} onClick={onClick}>
       <strong>{n}</strong>
-      <span>{label}</span>
+      <span>{label}{onClick ? " ›" : ""}</span>
     </div>
   );
 }
@@ -1752,6 +1801,71 @@ function Row({ k, v, danger, onCopy, copyVal, copyLabel }) {
 /* ============================================================
    التقارير
    ============================================================ */
+function ProfitStatement({ data, toBase }) {
+  const MONTHS = ["يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"];
+  const now = new Date();
+  const [mode, setMode] = useState("month");
+  const [year, setYear] = useState(now.getFullYear());
+  const [month, setMonth] = useState(now.getMonth());
+  const stats = useMemo(() => {
+    let income = 0, expense = 0, profit = 0, count = 0;
+    const monthly = Array(12).fill(0);
+    (data.transactions || []).forEach((tr) => {
+      if (!tr.date) return;
+      const d = parseDate(tr.date);
+      const ty = d.getFullYear(), tm = d.getMonth();
+      const inP = mode === "month" ? ty === year && tm === month : ty === year;
+      if (ty === year) monthly[tm] += txProfit(tr, toBase);
+      if (!inP) return;
+      const v = toBase(tr.amount, tr.currency);
+      if (tr.isExpense) expense += v; else income += v;
+      profit += txProfit(tr, toBase);
+      if (tr.type === "شحن") count++;
+    });
+    return { income, expense, profit, count, monthly };
+  }, [data.transactions, toBase, mode, year, month]);
+  const prev = () => {
+    if (mode === "month") { if (month === 0) { setMonth(11); setYear((y) => y - 1); } else setMonth((m) => m - 1); }
+    else setYear((y) => y - 1);
+  };
+  const next = () => {
+    if (mode === "month") { if (month === 11) { setMonth(0); setYear((y) => y + 1); } else setMonth((m) => m + 1); }
+    else setYear((y) => y + 1);
+  };
+  const maxM = Math.max(1, ...stats.monthly.map((x) => Math.abs(x)));
+  return (
+    <section className="sn-block">
+      <h2>📑 كشف الأرباح</h2>
+      <div className="sn-seg">
+        <button className={mode === "month" ? "is-on" : ""} onClick={() => setMode("month")}>شهري</button>
+        <button className={mode === "year" ? "is-on" : ""} onClick={() => setMode("year")}>سنوي</button>
+      </div>
+      <div className="sn-period-nav">
+        <button onClick={prev} aria-label="السابق">‹</button>
+        <span>{mode === "month" ? `${MONTHS[month]} ${year}` : `سنة ${year}`}</span>
+        <button onClick={next} aria-label="التالي">›</button>
+      </div>
+      <div className="sn-ps-profit">
+        <span>صافي الربح</span>
+        <strong className={stats.profit < 0 ? "sn-neg" : ""}>{money(stats.profit)} عملة</strong>
+      </div>
+      <div className="sn-ps-row"><span>المبيعات (الدخل)</span><strong>{money(stats.income)} عملة</strong></div>
+      <div className="sn-ps-row"><span>المصروفات (للمورّد)</span><strong>{money(stats.expense)} عملة</strong></div>
+      <div className="sn-ps-row"><span>عدد عمليات الشحن</span><strong>{stats.count}</strong></div>
+      {mode === "year" && (
+        <div className="sn-year-bars">
+          {stats.monthly.map((v, i) => (
+            <div className="sn-ybar" key={i} title={`${MONTHS[i]}: ${money(v)}`}>
+              <div className={"sn-ybar-fill" + (v < 0 ? " neg" : "")} style={{ height: Math.max(2, Math.round((Math.abs(v) / maxM) * 56)) }} />
+              <span>{i + 1}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function Reports({ data, toBase, settings }) {
   const t = todayStr();
   const month = t.slice(0, 7);
@@ -1829,6 +1943,8 @@ function Reports({ data, toBase, settings }) {
 
   return (
     <div className="sn-page">
+      <ProfitStatement data={data} toBase={toBase} />
+
       <section className="sn-profit-grid">
         <div className="sn-profit sn-profit--day">
           <span className="sn-profit-lbl">أرباح اليوم</span>
@@ -3404,6 +3520,21 @@ const CSS = `
 .sn-logo{font-size:30px;filter:drop-shadow(0 0 8px rgba(255,209,102,.5))}
 .sn-brand h1{font-size:21px;font-weight:800;letter-spacing:.5px}
 .sn-brand p{font-size:12.5px;color:var(--muted);margin-top:2px}
+.sn-menu-btn{position:absolute;top:18px;left:16px;z-index:2;width:42px;height:42px;border-radius:12px;border:1px solid rgba(255,255,255,.15);background:rgba(255,255,255,.08);color:#fff;font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
+.sn-drawer-wrap{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.55);display:flex;justify-content:flex-start;animation:snFade .15s ease}
+.sn-drawer{width:80%;max-width:320px;height:100%;background:var(--surface);border-inline-end:1px solid var(--border);display:flex;flex-direction:column;box-shadow:0 0 40px rgba(0,0,0,.5);animation:snSlideIn .22s ease;overflow-y:auto}
+@keyframes snSlideIn{from{transform:translateX(-100%)}to{transform:translateX(0)}}
+.sn-drawer-head{display:flex;align-items:center;gap:12px;padding:22px 18px;background:linear-gradient(135deg,#13204a,#0a1024);border-bottom:1px solid var(--border)}
+.sn-drawer-head h2{font-size:18px;font-weight:800}
+.sn-drawer-head p{font-size:12px;color:var(--muted);margin-top:2px}
+.sn-drawer-list{flex:1;padding:10px 0}
+.sn-drawer-item{display:flex;align-items:center;gap:14px;width:100%;padding:14px 20px;background:none;border:none;color:var(--text);font-family:inherit;font-size:15px;font-weight:600;cursor:pointer;text-align:right;border-inline-start:3px solid transparent}
+.sn-drawer-item:active{background:var(--surface2)}
+.sn-drawer-item.is-active{background:var(--surface2);border-inline-start-color:var(--accent);color:var(--accent)}
+.sn-drawer-ic{font-size:20px;width:26px;text-align:center;flex-shrink:0}
+.sn-drawer-lbl{flex:1}
+.sn-drawer-sep{height:1px;background:var(--border);margin:8px 18px}
+.sn-drawer-foot{text-align:center;padding:14px;color:var(--muted);font-size:13px;font-weight:700}
 
 .sn-main{padding:0}
 .sn-page{padding:16px 14px;display:flex;flex-direction:column;gap:16px}
@@ -3420,6 +3551,25 @@ const CSS = `
 /* الإحصائيات */
 .sn-stats{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .sn-stat{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:13px;display:flex;flex-direction:column;gap:3px;border-inline-start:3px solid var(--muted)}
+.sn-stat--tap{cursor:pointer}
+.sn-stat--tap:active{background:var(--surface2)}
+.sn-seg{display:flex;gap:6px;background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:4px;margin:10px 0}
+.sn-seg button{flex:1;background:none;border:none;color:var(--muted);font-family:inherit;font-size:14px;font-weight:700;padding:9px;border-radius:9px;cursor:pointer}
+.sn-seg button.is-on{background:var(--accent);color:#04122b}
+.sn-period-nav{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}
+.sn-period-nav button{width:40px;height:40px;border-radius:11px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:22px;cursor:pointer;line-height:1}
+.sn-period-nav span{font-weight:800;font-size:15px}
+.sn-ps-profit{display:flex;justify-content:space-between;align-items:center;background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px}
+.sn-ps-profit span{color:var(--muted);font-weight:700}
+.sn-ps-profit strong{font-size:20px;color:var(--ok)}
+.sn-ps-row{display:flex;justify-content:space-between;padding:9px 2px;border-bottom:1px dashed var(--border);font-size:13.5px}
+.sn-ps-row:last-child{border-bottom:none}
+.sn-ps-row span{color:var(--muted)}
+.sn-year-bars{display:flex;align-items:flex-end;justify-content:space-between;gap:3px;height:80px;margin-top:14px;padding-top:6px;border-top:1px solid var(--border)}
+.sn-ybar{flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;height:100%;justify-content:flex-end}
+.sn-ybar-fill{width:100%;max-width:16px;background:var(--accent);border-radius:4px 4px 0 0}
+.sn-ybar-fill.neg{background:var(--bad)}
+.sn-ybar span{font-size:9px;color:var(--muted)}
 .sn-stat strong{font-size:24px;font-weight:800}
 .sn-stat span{font-size:12.5px;color:var(--muted)}
 .sn-stat--ok{border-inline-start-color:var(--ok)}
@@ -3505,6 +3655,7 @@ const CSS = `
 .sn-fin--brk{background:rgba(255,209,102,.14);color:#ffe199;border-color:rgba(255,209,102,.34)}
 .sn-fin--warn{background:rgba(244,63,94,.2);color:#ffd0d6;border:1px solid rgba(244,63,94,.5);animation:snPulse 1.4s ease-in-out infinite}
 @keyframes snPulse{0%,100%{box-shadow:0 0 0 0 rgba(244,63,94,.5)}50%{box-shadow:0 0 0 5px rgba(244,63,94,0)}}
+@keyframes snFade{from{opacity:0}to{opacity:1}}
 .sn-hold-wrap{display:flex;flex-direction:column;align-items:center;gap:3px;width:52px}
 .sn-hold{position:relative;width:40px;height:40px;border-radius:50%;border:1.5px solid var(--border);background:var(--surface);overflow:hidden;display:flex;align-items:center;justify-content:center;cursor:pointer;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;flex-shrink:0;transition:transform .1s}
 .sn-hold.is-holding{transform:scale(1.12)}
