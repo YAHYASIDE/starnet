@@ -2055,8 +2055,8 @@ function DeviceForm({ initial, settings, devices = [], contacts = [], agents = [
         currency: c.currency,
         payMethod: c.payMethod,
         agentId: c.agentId,
-        costLocal: "",
-        totalCustomer: "",
+        costLocal: c.cost ?? "",
+        totalCustomer: c.totalCustomer ?? "",
         createdAt: c.createdAt || "",
       };
     });
@@ -2758,6 +2758,8 @@ function ContactForm({ initial, agents = [], onCancel, onSave }) {
     emailPassword: initial?.emailPassword || "",
     country: initial?.country || "",
     currency: initial?.currency || "MRU",
+    totalCustomer: initial?.totalCustomer ?? "",
+    cost: initial?.cost ?? "",
     payMethod: initial?.payMethod || "BANKILY",
     agentId: initial?.agentId || "",
     note: initial?.note || "",
@@ -2800,6 +2802,14 @@ function ContactForm({ initial, agents = [], onCancel, onSave }) {
           ))}
         </select>
       </Field>
+      <div className="sn-grid2">
+        <Field label="سعر الشحن المعتاد (المطلوب)">
+          <input type="number" inputMode="decimal" value={c.totalCustomer} onChange={(e) => set("totalCustomer", e.target.value)} placeholder="بعملة الدفع" />
+        </Field>
+        <Field label="تكلفة الشحن ($) — اختياري">
+          <input type="number" inputMode="decimal" value={c.cost} onChange={(e) => set("cost", e.target.value)} placeholder="بالدولار" />
+        </Field>
+      </div>
       <Field label="المندوب">
         <select value={c.agentId} onChange={(e) => set("agentId", e.target.value)}>
           <option value="">— بدون مندوب —</option>
