@@ -319,6 +319,7 @@ function StarNetApp() {
   const [data, setData] = useState(null);
   const [tab, setTab] = useState("dashboard");
   const [drawer, setDrawer] = useState(false);
+  const [panel, setPanel] = useState(null); // null | countries | contacts | excel | backup | trash
   const [editing, setEditing] = useState(null); // device | "new" | null
   const [renewing, setRenewing] = useState(null); // device | null
   const [collecting, setCollecting] = useState(null); // device being collected | null
@@ -808,21 +809,29 @@ function StarNetApp() {
                 </button>
               ))}
               <div className="sn-drawer-sep" />
-              <button className="sn-drawer-item" onClick={() => { setTab("dashboard"); setEditing("new"); setDrawer(false); }}>
+              <button className="sn-drawer-item" onClick={() => { setEditing("new"); setDrawer(false); }}>
                 <span className="sn-drawer-ic">➕</span>
                 <span className="sn-drawer-lbl">إضافة جهاز جديد</span>
               </button>
-              <button className="sn-drawer-item" onClick={() => { setTab("settings"); setEditingContact("new"); setDrawer(false); }}>
+              <button className="sn-drawer-item" onClick={() => { setPanel("contacts"); setDrawer(false); }}>
                 <span className="sn-drawer-ic">📒</span>
-                <span className="sn-drawer-lbl">إضافة عميل للدفتر</span>
+                <span className="sn-drawer-lbl">دفتر العملاء ({(data.contacts || []).length})</span>
               </button>
-              <button className="sn-drawer-item" onClick={() => { setTab("settings"); setDrawer(false); }}>
-                <span className="sn-drawer-ic">📥</span>
-                <span className="sn-drawer-lbl">استيراد من Excel</span>
-              </button>
-              <button className="sn-drawer-item" onClick={() => { setTab("settings"); setDrawer(false); }}>
+              <button className="sn-drawer-item" onClick={() => { setPanel("countries"); setDrawer(false); }}>
                 <span className="sn-drawer-ic">💱</span>
-                <span className="sn-drawer-lbl">العملات والنسخ الاحتياطي</span>
+                <span className="sn-drawer-lbl">سجل العملات ({(data.countries || []).length})</span>
+              </button>
+              <button className="sn-drawer-item" onClick={() => { setPanel("excel"); setDrawer(false); }}>
+                <span className="sn-drawer-ic">📊</span>
+                <span className="sn-drawer-lbl">استيراد / تصدير Excel</span>
+              </button>
+              <button className="sn-drawer-item" onClick={() => { setPanel("backup"); setDrawer(false); }}>
+                <span className="sn-drawer-ic">☁️</span>
+                <span className="sn-drawer-lbl">النسخ الاحتياطي ودرايف</span>
+              </button>
+              <button className="sn-drawer-item" onClick={() => { setPanel("trash"); setDrawer(false); }}>
+                <span className="sn-drawer-ic">🗑️</span>
+                <span className="sn-drawer-lbl">سلة المحذوفات ({(data.trash || []).length})</span>
               </button>
             </div>
             <p className="sn-drawer-foot">STAR NET ⭐</p>
@@ -874,22 +883,7 @@ function StarNetApp() {
         {tab === "settings" && (
           <Settings
             settings={settings}
-            data={data}
             onSave={updateSettings}
-            onAddCountry={() => setEditingCountry("new")}
-            onEditCountry={setEditingCountry}
-            onDeleteCountry={deleteCountry}
-            onAddContact={() => setEditingContact("new")}
-            onEditContact={setEditingContact}
-            onDeleteContact={deleteContact}
-            onImportExcel={importDevicesFromRows}
-            onRestoreTrash={restoreTrash}
-            onPurgeTrash={purgeTrash}
-            onEmptyTrash={emptyTrash}
-            onImport={(d) => {
-              setData(d);
-              flash("تم استيراد البيانات ✅");
-            }}
             onReset={() =>
               setConfirm({
                 text: "مسح كل البيانات نهائياً؟ لا يمكن التراجع.",
@@ -954,6 +948,24 @@ function StarNetApp() {
             saveContact(c);
             setEditingContact(null);
           }}
+        />
+      )}
+      {panel && (
+        <ToolsPanel
+          kind={panel}
+          data={data}
+          onClose={() => setPanel(null)}
+          onAddCountry={() => setEditingCountry("new")}
+          onEditCountry={setEditingCountry}
+          onDeleteCountry={deleteCountry}
+          onAddContact={() => setEditingContact("new")}
+          onEditContact={setEditingContact}
+          onDeleteContact={deleteContact}
+          onImportExcel={importDevicesFromRows}
+          onImport={(d) => { setData(d); flash("تم استيراد البيانات ✅"); }}
+          onRestoreTrash={restoreTrash}
+          onPurgeTrash={purgeTrash}
+          onEmptyTrash={emptyTrash}
         />
       )}
       {editingCountry && (
@@ -3087,17 +3099,11 @@ function AgentDevices({ agent, data, toBase, onClose, onEdit, onRenew, onCopy, o
 }
 
 /* ============================================================
-   الإعدادات
+   أدوات (تُفتح من القائمة الجانبية)
    ============================================================ */
-function Settings({ settings, data, onSave, onAddCountry, onEditCountry, onDeleteCountry, onAddContact, onEditContact, onDeleteContact, onImportExcel, onRestoreTrash, onPurgeTrash, onEmptyTrash, onImport, onReset }) {
-  const [s, setS] = useState(settings);
+function ToolsPanel({ kind, data, onClose, onAddCountry, onEditCountry, onDeleteCountry, onAddContact, onEditContact, onDeleteContact, onImportExcel, onImport, onRestoreTrash, onPurgeTrash, onEmptyTrash }) {
   const fileRef = useRef(null);
   const excelRef = useRef(null);
-  const set = (k, v) => setS((p) => ({ ...p, [k]: v }));
-  const setRate = (cur, v) =>
-    setS((p) => ({ ...p, rates: { ...p.rates, [cur]: Number(v) || 0 } }));
-
-  // ====== استيراد من Excel ======
   const EXCEL_HEADERS = [
     "اسم العميل", "رمز الدولة", "رقم الهاتف", "البريد الإلكتروني", "رقم الحساب",
     "كلمة مرور الواي فاي", "كلمة مرور البريد", "تاريخ البداية", "مدة الأيام", "الدولة",
@@ -3147,13 +3153,39 @@ function Settings({ settings, data, onSave, onAddCountry, onEditCountry, onDelet
           return out;
         });
         onImportExcel(rows);
+        onClose();
       } catch (err) {
         alert("تعذّر قراءة الملف. تأكّد أنه ملف Excel صحيح بنفس أعمدة القالب.");
       }
     };
     reader.readAsArrayBuffer(file);
   };
-
+  const exportExcel = () => {
+    if (!window.XLSX) { alert("أعد فتح التطبيق مع الإنترنت أولاً لتفعيل ميزة Excel."); return; }
+    const rows = (data.devices || []).map((d) => ({
+      "اسم العميل": d.customerName || "",
+      "رمز الدولة": d.dialCode || "",
+      "رقم الهاتف": d.phone || "",
+      "البريد الإلكتروني": d.email || "",
+      "رقم الحساب": d.accountNumber || "",
+      "كلمة مرور الواي فاي": d.wifiPassword || "",
+      "كلمة مرور البريد": d.emailPassword || "",
+      "تاريخ البداية": fmtDate(d.startDate),
+      "مدة الأيام": d.durationDays || "",
+      "الدولة": d.country || "",
+      "تكلفة الشحن بالدولار": d.cost || 0,
+      "المطلوب من الزبون": d.totalCustomer || 0,
+      "المدفوع": d.amountPaid || 0,
+      "العملة": d.currency || "MRU",
+      "تطبيق الدفع": d.payMethod || "",
+      "دفعت للمورد": d.costPaid ? "نعم" : "لا",
+      "ملاحظة": (d.notes || []).join(" | "),
+    }));
+    const ws = window.XLSX.utils.json_to_sheet(rows, { header: EXCEL_HEADERS });
+    const wb = window.XLSX.utils.book_new();
+    window.XLSX.utils.book_append_sheet(wb, ws, "الأجهزة");
+    window.XLSX.writeFile(wb, `اجهزة_STARNET_${todayStr()}.xlsx`);
+  };
   const exportData = () => {
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -3172,11 +3204,11 @@ function Settings({ settings, data, onSave, onAddCountry, onEditCountry, onDelet
         await navigator.share({ files: [file], title: "نسخة STAR NET الاحتياطية" });
         return;
       }
-    } catch (e) { /* المستخدم ألغى أو غير مدعوم */ if (e && e.name === "AbortError") return; }
+    } catch (e) { if (e && e.name === "AbortError") return; }
     try {
       if (navigator.share) { await navigator.share({ title: "نسخة STAR NET", text: json }); return; }
     } catch (e) { if (e && e.name === "AbortError") return; }
-    exportData(); // احتياطي: تنزيل ملف
+    exportData();
   };
   const importData = (e) => {
     const file = e.target.files?.[0];
@@ -3185,13 +3217,134 @@ function Settings({ settings, data, onSave, onAddCountry, onEditCountry, onDelet
     reader.onload = () => {
       try {
         const parsed = JSON.parse(reader.result);
-        if (parsed.devices) onImport({ ...DEFAULT_DATA, ...parsed });
-      } catch (err) {
-        /* ملف غير صالح */
-      }
+        if (parsed.devices) { onImport({ ...DEFAULT_DATA, ...parsed }); onClose(); }
+      } catch (err) { /* ملف غير صالح */ }
     };
     reader.readAsText(file);
   };
+
+  const titles = {
+    countries: "💱 سجل عملات الدول",
+    contacts: "📒 دفتر العملاء",
+    excel: "📊 استيراد / تصدير Excel",
+    backup: "☁️ النسخ الاحتياطي ودرايف",
+    trash: "🗑️ سلة المحذوفات",
+  };
+
+  return (
+    <Sheet title={titles[kind] || "أدوات"} onClose={onClose}>
+      {kind === "countries" && (
+        <>
+          <p className="sn-hint" style={{ marginTop: 0 }}>الدول التي تشحن منها وسعر عملتها مقابل الدولار. تُستخدم لحساب تكلفة الشحن بالدولار تلقائياً.</p>
+          {(data.countries || []).map((c) => (
+            <div className="sn-country-row" key={c.id}>
+              <div>
+                <span className="sn-country-name">{c.name}</span>
+                <span className="sn-country-sub">1$ = {c.perDollar} {c.currency}</span>
+              </div>
+              <div className="sn-country-acts">
+                <button className="sn-mini" onClick={() => onEditCountry(c)}>✏️</button>
+                <button className="sn-mini sn-mini--red" onClick={() => onDeleteCountry(c)}>🗑️</button>
+              </div>
+            </div>
+          ))}
+          <button className="sn-btn sn-btn--primary sn-full" onClick={onAddCountry} style={{ marginTop: 10 }}>+ إضافة دولة/عملة</button>
+        </>
+      )}
+
+      {kind === "contacts" && (
+        <>
+          <p className="sn-hint" style={{ marginTop: 0 }}>احفظ بيانات عملائك (الإيميل، الحساب…) دون عملية شحن. تظهر تلقائياً في خانة الاسم عند «إضافة جهاز».</p>
+          {(data.contacts || []).length === 0 && <p className="sn-muted-txt">لا يوجد عملاء محفوظون بعد.</p>}
+          {(data.contacts || []).map((c) => (
+            <div className="sn-country-row" key={c.id}>
+              <div style={{ minWidth: 0 }}>
+                <span className="sn-country-name">{c.name}</span>
+                <span className="sn-country-sub" dir="ltr" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {[(c.dialCode || "") + " " + (c.phone || ""), c.email].map((x) => (x || "").trim()).filter(Boolean).join(" · ") || "—"}
+                </span>
+              </div>
+              <div className="sn-country-acts">
+                <button className="sn-mini" onClick={() => onEditContact(c)}>✏️</button>
+                <button className="sn-mini sn-mini--red" onClick={() => onDeleteContact(c)}>🗑️</button>
+              </div>
+            </div>
+          ))}
+          <button className="sn-btn sn-btn--primary sn-full" onClick={onAddContact} style={{ marginTop: 10 }}>+ إضافة عميل (بدون شحن)</button>
+        </>
+      )}
+
+      {kind === "excel" && (
+        <>
+          <p className="sn-hint" style={{ marginTop: 0 }}>استورد أجهزتك من ملف Excel (كل صف = جهاز) أو صدّر أجهزتك الحالية إلى ملف Excel.</p>
+          <ol className="sn-steps">
+            <li>للاستيراد: نزّل القالب واملأه، «اسم العميل» إلزامي.</li>
+            <li>التاريخ يوم/شهر/سنة. العملة: MRU أو USDT أو FCFA. «دفعت للمورد»: نعم/لا.</li>
+          </ol>
+          <button className="sn-btn sn-btn--ghost sn-full" onClick={downloadTemplate} style={{ marginBottom: 8 }}>⬇️ تنزيل القالب الفارغ</button>
+          <button className="sn-btn sn-btn--primary sn-full" onClick={() => excelRef.current?.click()} style={{ marginBottom: 8 }}>⬆️ استيراد من Excel</button>
+          <button className="sn-btn sn-btn--ghost sn-full" onClick={exportExcel}>📊 تصدير الأجهزة إلى Excel ({(data.devices || []).length})</button>
+          <input ref={excelRef} type="file" accept=".xlsx,.xls,.csv" hidden onChange={handleExcel} />
+        </>
+      )}
+
+      {kind === "backup" && (
+        <>
+          <div className="sn-grid2">
+            <button className="sn-btn sn-btn--ghost" onClick={exportData}>⬇️ تصدير ملف</button>
+            <button className="sn-btn sn-btn--ghost" onClick={() => fileRef.current?.click()}>⬆️ استيراد ملف</button>
+          </div>
+          <button className="sn-btn sn-btn--primary sn-full" style={{ marginTop: 10 }} onClick={shareData}>📤 مشاركة النسخة (إلى درايف…)</button>
+          <button
+            className="sn-btn sn-btn--ghost sn-full"
+            style={{ marginTop: 10 }}
+            onClick={() => {
+              const ok = copyToClipboard(JSON.stringify(data));
+              alert(ok ? "تم نسخ النسخة الاحتياطية — الصقها في ملاحظة أو جوجل درايف للحفظ." : "تعذّر النسخ");
+            }}
+          >
+            📋 نسخ النسخة الاحتياطية (نص)
+          </button>
+          <input ref={fileRef} type="file" accept="application/json" hidden onChange={importData} />
+          <p className="sn-hint">بياناتك تُحفظ تلقائياً داخل التطبيق. للحفظ على درايف: «📤 مشاركة النسخة» ثم اختر <strong>Google Drive</strong>. عند الحاجة نزّل الملف من درايف واستورده. صدّر/شارك نسخة كل فترة للأمان (المزامنة التلقائية غير متاحة).</p>
+        </>
+      )}
+
+      {kind === "trash" && (
+        <>
+          {(data.trash || []).length === 0 ? (
+            <p className="sn-hint" style={{ marginTop: 0 }}>لا عناصر محذوفة. عند حذف جهاز يُنقل هنا ويمكن استعادته.</p>
+          ) : (
+            <>
+              {(data.trash || []).map((item) => (
+                <div className="sn-trash-row" key={item.device.id}>
+                  <div>
+                    <span className="sn-trash-name">{item.device.customerName || "بدون اسم"}</span>
+                    <span className="sn-trash-sub">{item.device.accountNumber || item.device.phone || "—"} • حُذف {fmtDate(item.deletedAt)}</span>
+                  </div>
+                  <div className="sn-trash-acts">
+                    <button className="sn-mini sn-mini--green" onClick={() => onRestoreTrash(item)}>استعادة</button>
+                    <button className="sn-mini sn-mini--red" onClick={() => onPurgeTrash(item)}>حذف نهائي</button>
+                  </div>
+                </div>
+              ))}
+              <button className="sn-btn sn-btn--ghost sn-full" style={{ marginTop: 10 }} onClick={onEmptyTrash}>إفراغ السلة نهائياً</button>
+            </>
+          )}
+        </>
+      )}
+    </Sheet>
+  );
+}
+
+/* ============================================================
+   الإعدادات
+   ============================================================ */
+function Settings({ settings, onSave, onReset }) {
+  const [s, setS] = useState(settings);
+  const set = (k, v) => setS((p) => ({ ...p, [k]: v }));
+  const setRate = (cur, v) =>
+    setS((p) => ({ ...p, rates: { ...p.rates, [cur]: Number(v) || 0 } }));
 
   return (
     <div className="sn-page">
@@ -3222,79 +3375,6 @@ function Settings({ settings, data, onSave, onAddCountry, onEditCountry, onDelet
       </section>
 
       <section className="sn-block">
-        <div className="sn-sec-head" style={{ marginBottom: 12 }}>
-          <h2 style={{ margin: 0 }}>سجل عملات الدول</h2>
-          <span className="sn-count">{(data.countries || []).length}</span>
-        </div>
-        <p className="sn-hint" style={{ marginTop: 0 }}>
-          الدول التي تشحن منها وسعر عملتها مقابل الدولار. تُستخدم لحساب تكلفة الشحن بالدولار تلقائياً.
-        </p>
-        {(data.countries || []).map((c) => (
-          <div className="sn-country-row" key={c.id}>
-            <div>
-              <span className="sn-country-name">{c.name}</span>
-              <span className="sn-country-sub">1$ = {c.perDollar} {c.currency}</span>
-            </div>
-            <div className="sn-country-acts">
-              <button className="sn-mini" onClick={() => onEditCountry(c)}>✏️</button>
-              <button className="sn-mini sn-mini--red" onClick={() => onDeleteCountry(c)}>🗑️</button>
-            </div>
-          </div>
-        ))}
-        <button className="sn-btn sn-btn--ghost sn-full" onClick={onAddCountry} style={{ marginTop: 10 }}>
-          + إضافة دولة/عملة
-        </button>
-      </section>
-
-      <section className="sn-block">
-        <div className="sn-sec-head" style={{ marginBottom: 12 }}>
-          <h2 style={{ margin: 0 }}>📒 دفتر العملاء</h2>
-          <span className="sn-count">{(data.contacts || []).length}</span>
-        </div>
-        <p className="sn-hint" style={{ marginTop: 0 }}>
-          احفظ بيانات عملائك (الإيميل، الحساب…) دون عملية شحن. تظهر تلقائياً في خانة الاسم عند «إضافة جهاز».
-        </p>
-        {(data.contacts || []).length === 0 && <p className="sn-muted-txt">لا يوجد عملاء محفوظون بعد.</p>}
-        {(data.contacts || []).map((c) => (
-          <div className="sn-country-row" key={c.id}>
-            <div style={{ minWidth: 0 }}>
-              <span className="sn-country-name">{c.name}</span>
-              <span className="sn-country-sub" dir="ltr" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {[(c.dialCode || "") + " " + (c.phone || ""), c.email].map((x) => (x || "").trim()).filter(Boolean).join(" · ") || "—"}
-              </span>
-            </div>
-            <div className="sn-country-acts">
-              <button className="sn-mini" onClick={() => onEditContact(c)}>✏️</button>
-              <button className="sn-mini sn-mini--red" onClick={() => onDeleteContact(c)}>🗑️</button>
-            </div>
-          </div>
-        ))}
-        <button className="sn-btn sn-btn--ghost sn-full" onClick={onAddContact} style={{ marginTop: 10 }}>
-          + إضافة عميل (بدون شحن)
-        </button>
-      </section>
-
-      <section className="sn-block">
-        <h2>📥 استيراد الأجهزة من Excel</h2>
-        <p className="sn-hint" style={{ marginTop: 0 }}>
-          نزّل القالب، املأ صفوف أجهزتك (كل صف = جهاز)، ثم ارفعه. تُضاف الأجهزة فوق القائمة الحالية دون حذف شيء.
-        </p>
-        <ol className="sn-steps">
-          <li>اضغط «تنزيل القالب» واملأه في Excel.</li>
-          <li>عمود «اسم العميل» إلزامي. التاريخ بصيغة يوم/شهر/سنة.</li>
-          <li>«العملة»: MRU أو USDT أو FCFA. «دفعت للمورد»: اكتب نعم أو لا.</li>
-          <li>احفظ الملف ثم اضغط «رفع ملف Excel».</li>
-        </ol>
-        <button className="sn-btn sn-btn--ghost sn-full" onClick={downloadTemplate} style={{ marginBottom: 8 }}>
-          ⬇️ تنزيل القالب الفارغ
-        </button>
-        <button className="sn-btn sn-btn--primary sn-full" onClick={() => excelRef.current?.click()}>
-          ⬆️ رفع ملف Excel
-        </button>
-        <input ref={excelRef} type="file" accept=".xlsx,.xls,.csv" hidden onChange={handleExcel} />
-      </section>
-
-      <section className="sn-block">
         <h2>رسائل واتساب</h2>
         <p className="sn-hint">المتغيرات: {"{name}"} • {"{email}"} • {"{account}"} • {"{start}"} (تاريخ الشحن) • {"{end}"} (الانتهاء) • {"{remaining}"} (الوقت المتبقّي/منذ الانتهاء) • {"{debt}"} (الدين) • {"{debtline}"} • {"{creditline}"} (الرصيد) • {"{wifi}"}</p>
         <Field label="رسالة تأكيد الشحن">
@@ -3315,58 +3395,7 @@ function Settings({ settings, data, onSave, onAddCountry, onEditCountry, onDelet
         حفظ الإعدادات
       </button>
 
-      <section className="sn-block">
-        <h2>النسخ الاحتياطي</h2>
-        <div className="sn-grid2">
-          <button className="sn-btn sn-btn--ghost" onClick={exportData}>⬇️ تصدير ملف</button>
-          <button className="sn-btn sn-btn--ghost" onClick={() => fileRef.current?.click()}>⬆️ استيراد ملف</button>
-        </div>
-        <button className="sn-btn sn-btn--primary sn-full" style={{ marginTop: 10 }} onClick={shareData}>
-          📤 مشاركة النسخة الاحتياطية (إلى درايف…)
-        </button>
-        <button
-          className="sn-btn sn-btn--ghost sn-full"
-          style={{ marginTop: 10 }}
-          onClick={() => {
-            const ok = copyToClipboard(JSON.stringify(data));
-            alert(ok ? "تم نسخ النسخة الاحتياطية — الصقها في ملاحظة أو جوجل درايف للحفظ." : "تعذّر النسخ");
-          }}
-        >
-          📋 نسخ النسخة الاحتياطية (نص)
-        </button>
-        <input ref={fileRef} type="file" accept="application/json" hidden onChange={importData} />
-        <p className="sn-hint">
-          بياناتك تُحفظ تلقائياً داخل التطبيق. للحفظ على جوجل درايف: اضغط «📤 مشاركة النسخة الاحتياطية» ثم اختر <strong>Google Drive</strong> من قائمة المشاركة. عند الحاجة، نزّل الملف من درايف واستورده. صدّر/شارك نسخة كل فترة للأمان (المزامنة التلقائية غير متاحة).
-        </p>
-      </section>
-
-      <section className="sn-block">
-        <div className="sn-sec-head">
-          <h2>🗑️ سلة المحذوفات</h2>
-          <span className="sn-count">{(data.trash || []).length}</span>
-        </div>
-        {(data.trash || []).length === 0 ? (
-          <p className="sn-hint" style={{ marginTop: 0 }}>لا عناصر محذوفة. عند حذف جهاز يُنقل هنا ويمكن استعادته.</p>
-        ) : (
-          <>
-            {(data.trash || []).map((item) => (
-              <div className="sn-trash-row" key={item.device.id}>
-                <div>
-                  <span className="sn-trash-name">{item.device.customerName || "بدون اسم"}</span>
-                  <span className="sn-trash-sub">{item.device.accountNumber || item.device.phone || "—"} • حُذف {fmtDate(item.deletedAt)}</span>
-                </div>
-                <div className="sn-trash-acts">
-                  <button className="sn-mini sn-mini--green" onClick={() => onRestoreTrash(item)}>استعادة</button>
-                  <button className="sn-mini sn-mini--red" onClick={() => onPurgeTrash(item)}>حذف نهائي</button>
-                </div>
-              </div>
-            ))}
-            <button className="sn-btn sn-btn--ghost sn-full" style={{ marginTop: 10 }} onClick={onEmptyTrash}>
-              إفراغ السلة نهائياً
-            </button>
-          </>
-        )}
-      </section>
+      <p className="sn-hint" style={{ textAlign: "center" }}>سجل العملات، دفتر العملاء، Excel، النسخ الاحتياطي، وسلة المحذوفات — كلها الآن في القائمة الجانبية (زر ☰ بالأعلى).</p>
 
       <button className="sn-btn sn-btn--danger sn-full" onClick={onReset}>
         🗑️ مسح كل البيانات
