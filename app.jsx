@@ -851,7 +851,8 @@ function StarNetApp() {
       {/* الرأس */}
       <header className="sn-header">
         <div className="sn-stars" aria-hidden="true" />
-        <button className="sn-menu-btn" onClick={() => setDrawer(true)} aria-label="القائمة">☰</button>
+        <button className="sn-hbtn sn-menu-btn" onClick={() => setDrawer(true)} aria-label="القائمة">☰</button>
+        <button className="sn-hbtn sn-add-btn" onClick={() => setEditing("new")} aria-label="إضافة جهاز">+</button>
         <div className="sn-brand">
           <span className="sn-logo">⭐</span>
           <div>
@@ -974,13 +975,6 @@ function StarNetApp() {
           />
         )}
       </main>
-
-      {/* زر الإضافة العائم */}
-      {(tab === "dashboard" || tab === "devices") && (
-        <button className="sn-fab" onClick={() => setEditing("new")} aria-label="إضافة جهاز">
-          +
-        </button>
-      )}
 
       {/* شريط التنقل السفلي */}
       <nav className="sn-tabs">
@@ -1745,6 +1739,12 @@ function DeviceCard({ d, agents = [], countries = [], balance, compact = false, 
           </div>
         </div>
         <div className="sn-card-status">
+          <div className="sn-quick-acts" onClick={(e) => e.stopPropagation()}>
+            {onEdit && <button className="sn-quick-btn" onClick={() => onEdit(d)} title="تعديل" aria-label="تعديل">✏️</button>}
+            {onWhats && <button className="sn-quick-btn" onClick={() => onWhats(d, "reminder")} title="تذكير" aria-label="تذكير">⏰</button>}
+            {onExport && <button className="sn-quick-btn" onClick={() => onExport(d)} title="PDF" aria-label="PDF">📄</button>}
+            {onDelete && <button className="sn-quick-btn sn-quick-del" onClick={() => onDelete(d)} title="حذف" aria-label="حذف">🗑️</button>}
+          </div>
           <span className={"sn-badge sn-badge--" + s.key}>{s.label}</span>
           <Countdown endDate={d.endDate} broken={d.broken} compact />
         </div>
@@ -3629,6 +3629,11 @@ const CSS = `
 .sn-brand h1{font-size:21px;font-weight:800;letter-spacing:.5px}
 .sn-brand p{font-size:12.5px;color:var(--muted);margin-top:2px}
 .sn-menu-btn{position:absolute;top:18px;left:16px;z-index:2;width:42px;height:42px;border-radius:12px;border:1px solid rgba(255,255,255,.15);background:rgba(255,255,255,.08);color:#fff;font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
+.sn-hbtn{position:absolute;top:18px;z-index:2;width:44px;height:44px;border-radius:50%;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.10);color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px);font-size:21px;line-height:1;padding:0}
+.sn-hbtn:active{transform:scale(.93)}
+.sn-menu-btn.sn-hbtn{left:16px;border-radius:50%;width:44px;height:44px}
+.sn-add-btn{right:16px;font-size:30px;font-weight:300;background:linear-gradient(135deg,#6f8bff,#8b5cf6);border-color:transparent;box-shadow:0 4px 14px rgba(120,120,255,.4)}
+.sn-brand{justify-content:center;text-align:center;padding:0 54px}
 .sn-drawer-wrap{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.55);display:flex;justify-content:flex-start;animation:snFade .15s ease}
 .sn-drawer{width:80%;max-width:320px;height:100%;background:var(--surface);border-inline-end:1px solid var(--border);display:flex;flex-direction:column;box-shadow:0 0 40px rgba(0,0,0,.5);animation:snSlideIn .22s ease;overflow-y:auto}
 @keyframes snSlideIn{from{transform:translateX(-100%)}to{transform:translateX(0)}}
@@ -3811,6 +3816,10 @@ const CSS = `
 .sn-card-name{display:block;font-weight:700;font-size:14px}
 .sn-card-phone{display:block;font-size:11px;color:var(--muted);margin-top:1px;direction:ltr;text-align:right}
 .sn-card-status{text-align:left;flex-shrink:0}
+.sn-quick-acts{display:flex;gap:6px;margin-bottom:6px;justify-content:flex-start}
+.sn-quick-btn{width:31px;height:31px;border-radius:50%;border:1px solid var(--border);background:var(--surface2);font-size:14px;line-height:1;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;flex-shrink:0}
+.sn-quick-btn:active{background:var(--surface);transform:scale(.92)}
+.sn-quick-del{border-color:rgba(244,63,94,.55)}
 .sn-card-end{display:block;font-size:12px;color:var(--muted);margin-top:4px}
 .sn-badge{font-size:10px;font-weight:700;padding:2px 8px;border-radius:9px;background:var(--surface2);color:var(--muted)}
 .sn-badge--expired{background:rgba(251,113,133,.18);color:#ffb3c0}
