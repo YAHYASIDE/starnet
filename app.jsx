@@ -416,6 +416,26 @@ function StarNetApp() {
           const idx = transactions.findIndex((tt) => tt.deviceId === form.id && tt.type === "دفع للمورّد");
           if (idx >= 0) transactions.splice(idx, 1);
         }
+        // مواءمة دخل الزبون: مجموع دخل هذا الجهاز = المبلغ المدفوع الجديد
+        const collected = transactions
+          .filter((tt) => tt.deviceId === form.id && tt.type === "تسديد دين")
+          .reduce((sum, tt) => sum + (Number(tt.amount) || 0), 0);
+        const base = Math.max(0, Math.round(((Number(form.amountPaid) || 0) - collected) * 100) / 100);
+        const inIdx = transactions.findIndex((tt) => tt.deviceId === form.id && tt.type === "شحن");
+        if (inIdx >= 0) {
+          transactions[inIdx] = { ...transactions[inIdx], amount: base, currency: form.currency, method: form.payMethod };
+        } else {
+          transactions.unshift({
+            id: uid(),
+            deviceId: form.id,
+            customerName: dev.customerName,
+            date: form.startDate,
+            amount: base,
+            currency: form.currency,
+            method: form.payMethod,
+            type: "شحن",
+          });
+        }
       }
       return { ...d, devices, transactions };
     });
