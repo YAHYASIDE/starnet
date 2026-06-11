@@ -1,0 +1,16 @@
+{
+  "name": "STAR NET — إدارة اشتراكات ستارلينك",
+  "short_name": "STAR NET",
+  "description": "إدارة أجهزة واشتراكات ستارلينك: العملاء، الشحن، الأرباح، الديون، المندوبون.",
+  "lang": "ar",
+  "dir": "rtl",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0a1024",
+  "theme_color": "#0a1024",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
