@@ -131,6 +131,7 @@ const DEFAULT_DATA = {
     { id: "c_arg", name: "الأرجنتين", currency: "ARS", perDollar: 1000 },
   ], // سجل الدول/العملات: {id, name, currency, perDollar} — perDollar = كم وحدة = 1 دولار
   trash: [], // سلة المحذوفات: {device, transactions, deletedAt}
+  contacts: [], // دفتر العملاء: إيميلات/بيانات محفوظة بدون عملية شحن
 };
 
 /* ----------------------- أدوات مساعدة ----------------------- */
@@ -168,6 +169,23 @@ function asNotes(n) {
   if (Array.isArray(n)) return n;
   if (typeof n === "string" && n.trim()) return [n];
   return [];
+}
+// تحويل قيمة تاريخ من Excel (Date أو نص dd/mm/yyyy أو yyyy-mm-dd) إلى صيغة التطبيق
+function excelToDateStr(v) {
+  if (!v && v !== 0) return "";
+  if (v instanceof Date && !isNaN(v)) {
+    return `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, "0")}-${String(v.getDate()).padStart(2, "0")}`;
+  }
+  const s = String(v).trim();
+  let m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/);
+  if (m) {
+    let y = m[3];
+    if (y.length === 2) y = "20" + y;
+    return `${y}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
+  }
+  m = s.match(/^(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})$/);
+  if (m) return `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}`;
+  return "";
 }
 function money(n) {
   return new Intl.NumberFormat("en-US").format(Math.round(Number(n) || 0));
@@ -305,6 +323,7 @@ function StarNetApp() {
   const [collecting, setCollecting] = useState(null); // device being collected | null
   const [editingAgent, setEditingAgent] = useState(null); // agent | "new" | null
   const [editingCountry, setEditingCountry] = useState(null); // country | "new" | null
+  const [editingContact, setEditingContact] = useState(null); // contact | "new" | null
   const [viewAgent, setViewAgent] = useState(null); // agent being viewed
   const [confirm, setConfirm] = useState(null); // {text, onYes}
   const [toast, setToast] = useState("");
@@ -322,6 +341,7 @@ function StarNetApp() {
           agents: saved.agents || [],
           countries: saved.countries && saved.countries.length ? saved.countries : DEFAULT_DATA.countries,
           trash: saved.trash || [],
+          contacts: saved.contacts || [],
         });
       } else {
         setData(DEFAULT_DATA);
@@ -647,6 +667,94 @@ function StarNetApp() {
     flash("تم حفظ الإعدادات ✅");
   }
 
+  // دفتر العملاء (إيميلات/بيانات بدون شحن)
+  function saveContact(c) {
+    setData((d) => {
+      if (c.id) {
+        return { ...d, contacts: (d.contacts || []).map((x) => (x.id === c.id ? { ...x, ...c } : x)) };
+      }
+      return { ...d, contacts: [...(d.contacts || []), { ...c, id: uid(), createdAt: new Date().toISOString() }] };
+    });
+    flash("تم حفظ العميل في الدفتر ✅");
+  }
+  function deleteContact(c) {
+    setConfirm({
+      text: `حذف "${c.name || c.email}" من دفتر العملاء؟`,
+      onYes: () => {
+        setData((d) => ({ ...d, contacts: (d.contacts || []).filter((x) => x.id !== c.id) }));
+        flash("تم الحذف من الدفتر");
+        setConfirm(null);
+      },
+    });
+  }
+
+  // استيراد أجهزة من ملف Excel (صفوف منسّقة)
+  function importDevicesFromRows(rows) {
+    const valid = (rows || []).filter((r) => (r.customerName || "").trim());
+    if (valid.length === 0) {
+      flash("لم يُعثر على صفوف صالحة (تأكّد من عمود «اسم العميل»)");
+      return;
+    }
+    setData((d) => {
+      const newDevices = [];
+      const newTx = [];
+      valid.forEach((r) => {
+        const name = String(r.customerName).trim();
+        const startDate = excelToDateStr(r.startDate) || todayStr();
+        const durationDays = Number(r.durationDays) > 0 ? Number(r.durationDays) : d.settings.defaultDuration;
+        const endDate = addDays(startDate, durationDays);
+        const total = Number(r.totalCustomer) || 0;
+        const paid = Number(r.amountPaid) || 0;
+        const diff = total - paid;
+        const currency = (r.currency || "MRU").toString().trim().toUpperCase();
+        const cost = Number(r.cost) || 0;
+        const costPaid = ["نعم", "yes", "true", "1", "✓"].includes(String(r.costPaid || "").trim().toLowerCase());
+        const dev = {
+          id: uid(),
+          createdAt: todayStr(),
+          customerName: name,
+          dialCode: (r.dialCode || "+222").toString().trim() || "+222",
+          phone: (r.phone || "").toString().trim(),
+          email: (r.email || "").toString().trim(),
+          accountNumber: (r.accountNumber || "").toString().trim(),
+          wifiPassword: (r.wifiPassword || "").toString().trim(),
+          emailPassword: (r.emailPassword || "").toString().trim(),
+          startDate,
+          durationDays,
+          endDate,
+          country: (r.country || "").toString().trim(),
+          costLocal: "",
+          cost,
+          costCurrency: "USDT",
+          costPaid,
+          supplierDueDate: addDays(startDate, d.settings.supplierDays),
+          totalCustomer: total,
+          amountPaid: paid,
+          currency: ["MRU", "USDT", "FCFA"].includes(currency) ? currency : "MRU",
+          debt: diff > 0 ? diff : 0,
+          debtCurrency: currency,
+          credit: diff < 0 ? -diff : 0,
+          creditCurrency: currency,
+          payMethod: (r.payMethod || "BANKILY").toString().trim() || "BANKILY",
+          originType: "",
+          originNote: "",
+          agentId: "",
+          photos: [],
+          audio: "",
+          notes: (r.note || "").toString().trim() ? [String(r.note).trim()] : [],
+          broken: false,
+        };
+        newDevices.push(dev);
+        newTx.push({ id: uid(), deviceId: dev.id, customerName: name, date: startDate, amount: paid, currency: dev.currency, method: dev.payMethod, type: "شحن" });
+        if (costPaid && cost > 0) {
+          newTx.push({ id: uid(), deviceId: dev.id, customerName: name, date: startDate, amount: cost, currency: "USDT", isExpense: true, type: "دفع للمورّد" });
+        }
+      });
+      return { ...d, devices: [...newDevices, ...d.devices], transactions: [...newTx, ...d.transactions] };
+    });
+    flash(`تم استيراد ${valid.length} جهازاً ✅`);
+  }
+
   if (!data) {
     return (
       <div className="sn-root sn-loading">
@@ -722,6 +830,10 @@ function StarNetApp() {
             onAddCountry={() => setEditingCountry("new")}
             onEditCountry={setEditingCountry}
             onDeleteCountry={deleteCountry}
+            onAddContact={() => setEditingContact("new")}
+            onEditContact={setEditingContact}
+            onDeleteContact={deleteContact}
+            onImportExcel={importDevicesFromRows}
             onRestoreTrash={restoreTrash}
             onPurgeTrash={purgeTrash}
             onEmptyTrash={emptyTrash}
@@ -776,11 +888,23 @@ function StarNetApp() {
           initial={editing === "new" ? null : editing}
           settings={settings}
           devices={data.devices}
+          contacts={data.contacts || []}
           agents={data.agents || []}
           countries={data.countries || []}
           onSaveRate={upsertCountryRate}
           onCancel={() => setEditing(null)}
           onSave={saveDevice}
+        />
+      )}
+      {editingContact && (
+        <ContactForm
+          initial={editingContact === "new" ? null : editingContact}
+          agents={data.agents || []}
+          onCancel={() => setEditingContact(null)}
+          onSave={(c) => {
+            saveContact(c);
+            setEditingContact(null);
+          }}
         />
       )}
       {editingCountry && (
@@ -1668,8 +1792,12 @@ function Reports({ data, toBase, settings }) {
       const e = (d.email || "").trim();
       if (e) map[e] = (map[e] || 0) + 1;
     });
+    (data.contacts || []).forEach((c) => {
+      const e = (c.email || "").trim();
+      if (e && !map[e]) map[e] = 0; // إيميل محفوظ بدون شحن
+    });
     return Object.entries(map).sort((a, b) => b[1] - a[1]);
-  }, [data.devices]);
+  }, [data.devices, data.contacts]);
   const [showEmails, setShowEmails] = useState(false);
 
   // المعاملات مجمّعة لكل زبون (كي لا تختلط)
@@ -1773,7 +1901,7 @@ function Reports({ data, toBase, settings }) {
           emails.map(([e, n]) => (
             <div className="sn-row" key={e}>
               <span className="sn-row-k" dir="ltr" style={{ textAlign: "right" }}>{e}</span>
-              <span className="sn-row-v">{n} جهاز</span>
+              <span className="sn-row-v">{n > 0 ? `${n} جهاز` : "محفوظ"}</span>
             </div>
           ))
         )}
@@ -1821,7 +1949,7 @@ function MiniStat({ label, val, danger }) {
 /* ============================================================
    نموذج إضافة / تعديل جهاز
    ============================================================ */
-function DeviceForm({ initial, settings, devices = [], agents = [], countries = [], onSaveRate, onCancel, onSave }) {
+function DeviceForm({ initial, settings, devices = [], contacts = [], agents = [], countries = [], onSaveRate, onCancel, onSave }) {
   const isNew = !initial;
   const [f, setF] = useState(
     initial
@@ -1903,15 +2031,37 @@ function DeviceForm({ initial, settings, devices = [], agents = [], countries = 
   // قاعدة العملاء: كل عميل فريد بآخر جهاز له (لاستعادة بياناته)
   const [showSug, setShowSug] = useState(false);
   const customers = useMemo(() => {
-    const map = {};
+    const devMap = {};
     (devices || []).forEach((d) => {
       const key = (d.customerName || "").trim();
       if (!key) return;
-      const prev = map[key];
-      if (!prev || (d.createdAt || "") > (prev.createdAt || "")) map[key] = d;
+      const prev = devMap[key];
+      if (!prev || (d.createdAt || "") > (prev.createdAt || "")) devMap[key] = d;
     });
-    return Object.values(map).sort((a, b) => (a.customerName || "").localeCompare(b.customerName || "", "ar"));
-  }, [devices]);
+    const out = { ...devMap };
+    (contacts || []).forEach((c) => {
+      const key = (c.name || "").trim();
+      if (!key || out[key]) return; // الجهاز أولى لأنه يحوي آخر سعر
+      out[key] = {
+        id: c.id,
+        customerName: c.name || "",
+        dialCode: c.dialCode,
+        phone: c.phone,
+        email: c.email,
+        accountNumber: c.accountNumber,
+        wifiPassword: c.wifiPassword,
+        emailPassword: c.emailPassword,
+        country: c.country,
+        currency: c.currency,
+        payMethod: c.payMethod,
+        agentId: c.agentId,
+        costLocal: "",
+        totalCustomer: "",
+        createdAt: c.createdAt || "",
+      };
+    });
+    return Object.values(out).sort((a, b) => (a.customerName || "").localeCompare(b.customerName || "", "ar"));
+  }, [devices, contacts]);
   const nameMatches = useMemo(() => {
     const s = (f.customerName || "").trim().toLowerCase();
     if (!s) return customers.slice(0, 8);
@@ -2596,6 +2746,85 @@ function Agents({ data, toBase, onAddAgent, onEditAgent, onDeleteAgent, onViewAg
   );
 }
 
+function ContactForm({ initial, agents = [], onCancel, onSave }) {
+  const isNew = !initial;
+  const [c, setC] = useState({
+    name: initial?.name || "",
+    dialCode: initial?.dialCode || "+222",
+    phone: initial?.phone || "",
+    email: initial?.email || "",
+    accountNumber: initial?.accountNumber || "",
+    wifiPassword: initial?.wifiPassword || "",
+    emailPassword: initial?.emailPassword || "",
+    country: initial?.country || "",
+    currency: initial?.currency || "MRU",
+    payMethod: initial?.payMethod || "BANKILY",
+    agentId: initial?.agentId || "",
+    note: initial?.note || "",
+  });
+  const set = (k, v) => setC((p) => ({ ...p, [k]: v }));
+  return (
+    <Sheet title={isNew ? "إضافة عميل للدفتر" : "تعديل عميل"} onClose={onCancel}>
+      <p className="sn-hint">احفظ بيانات الزبون (إيميله وحسابه…) دون عملية شحن. تظهر تلقائياً عند إضافة جهاز له لاحقاً.</p>
+      <Field label="اسم العميل *">
+        <input value={c.name} onChange={(e) => set("name", e.target.value)} placeholder="اسم الزبون" />
+      </Field>
+      <Field label="رقم الهاتف">
+        <div className="sn-phone-row">
+          <select className="sn-dial" value={c.dialCode} onChange={(e) => set("dialCode", e.target.value)}>
+            {DIAL_CODES.map((d) => (
+              <option key={d.c} value={d.c}>{d.c} {d.n}</option>
+            ))}
+          </select>
+          <input type="tel" dir="ltr" placeholder="رقم الزبون" value={c.phone} onChange={(e) => set("phone", e.target.value)} />
+        </div>
+      </Field>
+      <Field label="البريد الإلكتروني (حساب ستارلينك)">
+        <input dir="ltr" value={c.email} onChange={(e) => set("email", e.target.value)} placeholder="email@example.com" />
+      </Field>
+      <Field label="رقم الحساب">
+        <input dir="ltr" value={c.accountNumber} onChange={(e) => set("accountNumber", e.target.value)} />
+      </Field>
+      <div className="sn-grid2">
+        <Field label="كلمة مرور الواي فاي">
+          <input dir="ltr" value={c.wifiPassword} onChange={(e) => set("wifiPassword", e.target.value)} />
+        </Field>
+        <Field label="كلمة مرور البريد">
+          <input dir="ltr" value={c.emailPassword} onChange={(e) => set("emailPassword", e.target.value)} />
+        </Field>
+      </div>
+      <Field label="عملة الدفع المعتادة">
+        <select value={c.currency} onChange={(e) => set("currency", e.target.value)}>
+          {CURRENCIES.map((cur) => (
+            <option key={cur.code} value={cur.code}>{cur.label}</option>
+          ))}
+        </select>
+      </Field>
+      <Field label="المندوب">
+        <select value={c.agentId} onChange={(e) => set("agentId", e.target.value)}>
+          <option value="">— بدون مندوب —</option>
+          {agents.map((a) => (
+            <option key={a.id} value={a.id}>{a.name} ({a.percent || 0}%)</option>
+          ))}
+        </select>
+      </Field>
+      <Field label="ملاحظة (اختياري)">
+        <input value={c.note} onChange={(e) => set("note", e.target.value)} />
+      </Field>
+      <div className="sn-sheet-actions">
+        <button className="sn-btn sn-btn--ghost" onClick={onCancel}>إلغاء</button>
+        <button
+          className="sn-btn sn-btn--primary"
+          disabled={!c.name.trim()}
+          onClick={() => onSave({ ...c, id: initial?.id, name: c.name.trim() })}
+        >
+          {isNew ? "حفظ في الدفتر" : "حفظ التعديلات"}
+        </button>
+      </div>
+    </Sheet>
+  );
+}
+
 function CountryForm({ initial, onCancel, onSave }) {
   const isNew = !initial;
   const [name, setName] = useState(initial?.name || "");
@@ -2728,12 +2957,70 @@ function AgentDevices({ agent, data, toBase, onClose, onEdit, onRenew, onCopy, o
 /* ============================================================
    الإعدادات
    ============================================================ */
-function Settings({ settings, data, onSave, onAddCountry, onEditCountry, onDeleteCountry, onRestoreTrash, onPurgeTrash, onEmptyTrash, onImport, onReset }) {
+function Settings({ settings, data, onSave, onAddCountry, onEditCountry, onDeleteCountry, onAddContact, onEditContact, onDeleteContact, onImportExcel, onRestoreTrash, onPurgeTrash, onEmptyTrash, onImport, onReset }) {
   const [s, setS] = useState(settings);
   const fileRef = useRef(null);
+  const excelRef = useRef(null);
   const set = (k, v) => setS((p) => ({ ...p, [k]: v }));
   const setRate = (cur, v) =>
     setS((p) => ({ ...p, rates: { ...p.rates, [cur]: Number(v) || 0 } }));
+
+  // ====== استيراد من Excel ======
+  const EXCEL_HEADERS = [
+    "اسم العميل", "رمز الدولة", "رقم الهاتف", "البريد الإلكتروني", "رقم الحساب",
+    "كلمة مرور الواي فاي", "كلمة مرور البريد", "تاريخ البداية", "مدة الأيام", "الدولة",
+    "تكلفة الشحن بالدولار", "المطلوب من الزبون", "المدفوع", "العملة", "تطبيق الدفع",
+    "دفعت للمورد", "ملاحظة",
+  ];
+  const HEADER_MAP = {
+    "اسم العميل": "customerName", "الاسم": "customerName",
+    "رمز الدولة": "dialCode", "رقم الهاتف": "phone", "الهاتف": "phone",
+    "البريد الإلكتروني": "email", "البريد": "email", "الايميل": "email", "الإيميل": "email",
+    "رقم الحساب": "accountNumber", "الحساب": "accountNumber",
+    "كلمة مرور الواي فاي": "wifiPassword", "كلمة مرور البريد": "emailPassword",
+    "تاريخ البداية": "startDate", "البداية": "startDate",
+    "مدة الأيام": "durationDays", "المدة": "durationDays",
+    "الدولة": "country",
+    "تكلفة الشحن بالدولار": "cost", "التكلفة": "cost", "تكلفة الشحن": "cost",
+    "المطلوب من الزبون": "totalCustomer", "المطلوب": "totalCustomer", "الإجمالي": "totalCustomer",
+    "المدفوع": "amountPaid", "العملة": "currency",
+    "تطبيق الدفع": "payMethod", "دفعت للمورد": "costPaid", "دفعت للمورّد": "costPaid",
+    "ملاحظة": "note", "ملاحظات": "note",
+  };
+  const downloadTemplate = () => {
+    if (!window.XLSX) { alert("أعد فتح التطبيق مع الإنترنت أولاً لتفعيل ميزة Excel."); return; }
+    const example = ["محمد الأمين", "+222", "44123456", "mohamed@mail.com", "ACC-1001", "wifi1234", "", "01/06/2026", 28, "", 12, 5000, 5000, "MRU", "BANKILY", "نعم", "زبون قديم"];
+    const ws = window.XLSX.utils.aoa_to_sheet([EXCEL_HEADERS, example]);
+    const wb = window.XLSX.utils.book_new();
+    window.XLSX.utils.book_append_sheet(wb, ws, "الأجهزة");
+    window.XLSX.writeFile(wb, "نموذج_استيراد_الأجهزة.xlsx");
+  };
+  const handleExcel = (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    if (!window.XLSX) { alert("أعد فتح التطبيق مع الإنترنت أولاً لتفعيل ميزة Excel."); return; }
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const wb = window.XLSX.read(new Uint8Array(ev.target.result), { type: "array", cellDates: true });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const raw = window.XLSX.utils.sheet_to_json(ws, { defval: "" });
+        const rows = raw.map((row) => {
+          const out = {};
+          Object.keys(row).forEach((h) => {
+            const key = HEADER_MAP[String(h).trim()];
+            if (key) out[key] = row[h];
+          });
+          return out;
+        });
+        onImportExcel(rows);
+      } catch (err) {
+        alert("تعذّر قراءة الملف. تأكّد أنه ملف Excel صحيح بنفس أعمدة القالب.");
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
 
   const exportData = () => {
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
@@ -2825,6 +3112,54 @@ function Settings({ settings, data, onSave, onAddCountry, onEditCountry, onDelet
         <button className="sn-btn sn-btn--ghost sn-full" onClick={onAddCountry} style={{ marginTop: 10 }}>
           + إضافة دولة/عملة
         </button>
+      </section>
+
+      <section className="sn-block">
+        <div className="sn-sec-head" style={{ marginBottom: 12 }}>
+          <h2 style={{ margin: 0 }}>📒 دفتر العملاء</h2>
+          <span className="sn-count">{(data.contacts || []).length}</span>
+        </div>
+        <p className="sn-hint" style={{ marginTop: 0 }}>
+          احفظ بيانات عملائك (الإيميل، الحساب…) دون عملية شحن. تظهر تلقائياً في خانة الاسم عند «إضافة جهاز».
+        </p>
+        {(data.contacts || []).length === 0 && <p className="sn-muted-txt">لا يوجد عملاء محفوظون بعد.</p>}
+        {(data.contacts || []).map((c) => (
+          <div className="sn-country-row" key={c.id}>
+            <div style={{ minWidth: 0 }}>
+              <span className="sn-country-name">{c.name}</span>
+              <span className="sn-country-sub" dir="ltr" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {[(c.dialCode || "") + " " + (c.phone || ""), c.email].map((x) => (x || "").trim()).filter(Boolean).join(" · ") || "—"}
+              </span>
+            </div>
+            <div className="sn-country-acts">
+              <button className="sn-mini" onClick={() => onEditContact(c)}>✏️</button>
+              <button className="sn-mini sn-mini--red" onClick={() => onDeleteContact(c)}>🗑️</button>
+            </div>
+          </div>
+        ))}
+        <button className="sn-btn sn-btn--ghost sn-full" onClick={onAddContact} style={{ marginTop: 10 }}>
+          + إضافة عميل (بدون شحن)
+        </button>
+      </section>
+
+      <section className="sn-block">
+        <h2>📥 استيراد الأجهزة من Excel</h2>
+        <p className="sn-hint" style={{ marginTop: 0 }}>
+          نزّل القالب، املأ صفوف أجهزتك (كل صف = جهاز)، ثم ارفعه. تُضاف الأجهزة فوق القائمة الحالية دون حذف شيء.
+        </p>
+        <ol className="sn-steps">
+          <li>اضغط «تنزيل القالب» واملأه في Excel.</li>
+          <li>عمود «اسم العميل» إلزامي. التاريخ بصيغة يوم/شهر/سنة.</li>
+          <li>«العملة»: MRU أو USDT أو FCFA. «دفعت للمورد»: اكتب نعم أو لا.</li>
+          <li>احفظ الملف ثم اضغط «رفع ملف Excel».</li>
+        </ol>
+        <button className="sn-btn sn-btn--ghost sn-full" onClick={downloadTemplate} style={{ marginBottom: 8 }}>
+          ⬇️ تنزيل القالب الفارغ
+        </button>
+        <button className="sn-btn sn-btn--primary sn-full" onClick={() => excelRef.current?.click()}>
+          ⬆️ رفع ملف Excel
+        </button>
+        <input ref={excelRef} type="file" accept=".xlsx,.xls,.csv" hidden onChange={handleExcel} />
       </section>
 
       <section className="sn-block">
@@ -3313,7 +3648,8 @@ const CSS = `
 .sn-sug-name{font-weight:700;font-size:13.5px;color:var(--text)}
 .sn-sug-sub{font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sn-lookup-input{width:100%;margin-bottom:8px}
-.sn-lookup-row{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 0;border-bottom:1px dashed var(--border)}
+.sn-steps{margin:0 0 12px;padding-inline-start:20px;color:var(--muted);font-size:12.5px;line-height:1.9}
+.sn-steps li{margin-bottom:2px}.sn-lookup-row{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 0;border-bottom:1px dashed var(--border)}
 .sn-lookup-row:last-child{border-bottom:none}
 .sn-lookup-info{display:flex;flex-direction:column;gap:2px;min-width:0}
 .sn-lookup-name{font-weight:700;font-size:13.5px}
@@ -3327,9 +3663,9 @@ const CSS = `
 .sn-pay-apps{display:flex;flex-wrap:nowrap;gap:5px;overflow-x:auto}
 .sn-pay-app{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:7px 9px;font-family:inherit;font-size:11px;font-weight:700;color:var(--muted);cursor:pointer;white-space:nowrap;flex:1 0 auto}
 .sn-pay-app.is-on{background:var(--accent);color:#04122b;border-color:var(--accent)}
-.sn-phone-row{display:flex;gap:8px}
-.sn-dial{flex:0 0 auto;width:auto;min-width:96px}
-.sn-phone-row input{flex:1}
+.sn-phone-row{display:flex;gap:8px;align-items:center}
+.sn-field .sn-phone-row .sn-dial{flex:0 0 134px;width:134px;min-width:0}
+.sn-field .sn-phone-row input{flex:1 1 auto;width:auto;min-width:0}
 .sn-media-bar{display:flex;gap:12px;align-items:center;margin:12px 0 6px}
 .sn-icon-btn{width:42px;height:42px;border-radius:50%;border:1.5px solid var(--border);background:var(--surface2);font-size:18px;line-height:1;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;flex-shrink:0}
 .sn-icon-btn:disabled{opacity:.4}
