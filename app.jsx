@@ -118,6 +118,7 @@ const DEFAULT_DATA = {
     supplierDays: 23, // بعد كم يوم من البداية يستحق الدفع للمورّد
     rates: { USDT: 430, FCFA: 3.6, MRU: 1 }, // 1 وحدة من العملة → كم "عملة أساس"
     soonDays: 3,
+    sounds: true,
     msgCharged:
       "مرحباً {name} 👋\nتم شحن جهاز ستارلينك الخاص بك بنجاح ✅\n\n👤 الاسم: {name}\n📧 البريد: {email}\n🔢 رقم الحساب: {account}\n📅 تاريخ الشحن: {start}\n⏳ ينتهي الرصيد بتاريخ: {end}{debtline}{creditline}\n\nشكراً لتعاملك مع STAR NET ⭐",
     msgReminder:
@@ -315,7 +316,41 @@ async function persist(data) {
   }
 }
 
-// مواءمة الدخل: لكل جهاز غير مُجدَّد، دخله = المبلغ المدفوع فعلاً.
+// ===== أصوات قصيرة لطيفة (Web Audio — بلا ملفات) =====
+let _sndCtx = null;
+let SND_ON = true;
+function setSoundOn(v) { SND_ON = !!v; }
+function _sctx() {
+  if (typeof window === "undefined") return null;
+  try {
+    if (!_sndCtx) _sndCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (_sndCtx.state === "suspended") _sndCtx.resume();
+    return _sndCtx;
+  } catch (e) { return null; }
+}
+function _tone(ctx, freq, start, dur, vol, type) {
+  const o = ctx.createOscillator(), g = ctx.createGain();
+  o.type = type || "sine";
+  o.frequency.value = freq;
+  o.connect(g); g.connect(ctx.destination);
+  const t = ctx.currentTime + start;
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(vol, t + 0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.start(t); o.stop(t + dur + 0.03);
+}
+function playSound(kind) {
+  if (!SND_ON) return;
+  const ctx = _sctx(); if (!ctx) return;
+  const V = 0.09;
+  if (kind === "charge" || kind === "save") { _tone(ctx, 587, 0, 0.12, V); _tone(ctx, 880, 0.10, 0.16, V); }
+  else if (kind === "payment") { _tone(ctx, 784, 0, 0.10, V); _tone(ctx, 1175, 0.09, 0.16, V); }
+  else if (kind === "delete") { _tone(ctx, 330, 0, 0.13, V * 0.9, "triangle"); _tone(ctx, 247, 0.10, 0.18, V * 0.9, "triangle"); }
+  else if (kind === "tap") { _tone(ctx, 660, 0, 0.06, V * 0.7); }
+  else { _tone(ctx, 700, 0, 0.10, V); }
+}
+
+
 // تزيل دفعات «تسديد دين» القديمة المنفصلة (التي كانت تسبّب ربحاً وهمياً بعد إلغاء الدفعات).
 function reconcileIncome(data) {
   if (!data || !Array.isArray(data.transactions) || !Array.isArray(data.devices)) return data;
@@ -368,6 +403,7 @@ function StarNetApp() {
         setData(DEFAULT_DATA);
       }
       loaded.current = true;
+      try { setSoundOn(((saved && saved.settings) || {}).sounds !== false); } catch (e) {}
     })();
   }, []);
 
@@ -484,6 +520,7 @@ function StarNetApp() {
       return { ...d, devices, transactions, contacts };
     });
     flash(isNew ? "تمت إضافة الجهاز ✅" : "تم حفظ التعديلات ✅");
+    playSound(isNew ? "charge" : "save");
     setEditing(null);
   }
 
@@ -542,6 +579,7 @@ function StarNetApp() {
       return { ...d, devices, transactions };
     });
     flash("تم تسجيل تجديد كامل ✅");
+    playSound("charge");
     setRenewing(null);
   }
 
@@ -556,6 +594,7 @@ function StarNetApp() {
           trash: [{ device, transactions: d.transactions.filter((t) => t.deviceId === device.id), deletedAt: todayStr() }, ...(d.trash || [])],
         }));
         flash("نُقل إلى سلة المحذوفات 🗑️");
+        playSound("delete");
         setConfirm(null);
       },
     });
@@ -603,6 +642,7 @@ function StarNetApp() {
       };
     });
     flash("تم تسجيل الدفع ✅");
+    playSound("payment");
     setCollecting(null);
   }
 
@@ -658,13 +698,18 @@ function StarNetApp() {
           type: "دفع للمورّد",
         });
       }
+      // حدّث التكلفة المحلية (بعملة دولة الشحن) لتطابق المبلغ الجديد بالدولار
+      const rateEntry = device.country ? (d.countries || []).find((c) => c.name === device.country) : null;
+      const perDollar = rateEntry && Number(rateEntry.perDollar) > 0 ? Number(rateEntry.perDollar) : null;
+      const newLocal = perDollar ? Math.round(amt * perDollar * 100) / 100 : amt;
       return {
         ...d,
         transactions,
-        devices: d.devices.map((x) => (x.id === device.id ? { ...x, costPaid: true, cost: amt } : x)),
+        devices: d.devices.map((x) => (x.id === device.id ? { ...x, costPaid: true, cost: amt, costLocal: newLocal } : x)),
       };
     });
     flash("تم تسجيل الدفع للمورّد ✅");
+    playSound("payment");
     setPayingSupplier(null);
   }
 
@@ -766,7 +811,9 @@ function StarNetApp() {
 
   function updateSettings(s) {
     setData((d) => ({ ...d, settings: { ...d.settings, ...s } }));
+    setSoundOn(s.sounds !== false);
     flash("تم حفظ الإعدادات ✅");
+    playSound("save");
   }
 
   // دفتر العملاء (إيميلات/بيانات بدون شحن)
@@ -778,6 +825,7 @@ function StarNetApp() {
       return { ...d, contacts: [...(d.contacts || []), { ...c, id: uid(), createdAt: new Date().toISOString() }] };
     });
     flash("تم حفظ العميل في الدفتر ✅");
+    playSound("save");
   }
   function deleteContact(c) {
     setConfirm({
@@ -869,6 +917,7 @@ function StarNetApp() {
       return { ...d, devices: [...newDevices, ...d.devices], transactions: [...newTx, ...d.transactions], contacts };
     });
     flash(`تم استيراد ${valid.length} جهازاً ✅`);
+    playSound("charge");
   }
 
   if (!data) {
@@ -1134,6 +1183,7 @@ function StarNetApp() {
       {payingSupplier && (
         <SupplierPaySheet
           device={payingSupplier}
+          countries={data.countries || []}
           onCancel={() => setPayingSupplier(null)}
           onConfirm={confirmSupplierPay}
         />
@@ -2238,6 +2288,49 @@ function MiniStat({ label, val, danger }) {
 /* ============================================================
    نموذج إضافة / تعديل جهاز
    ============================================================ */
+// منتقي دولة الشحن: بحث بالاسم أو العملة (مثل ARS) مع عرض العملة بوضوح
+function CountryPicker({ value, onChange }) {
+  const [q, setQ] = useState("");
+  const [open, setOpen] = useState(false);
+  const matches = useMemo(() => {
+    const s = q.trim().toLowerCase();
+    const base = s
+      ? WORLD_SORTED.filter((c) => c.n.toLowerCase().includes(s) || (c.c || "").toLowerCase().includes(s))
+      : WORLD_SORTED;
+    return base.slice(0, 40);
+  }, [q]);
+  const sel = value ? WORLD_COUNTRIES.find((c) => c.n === value) : null;
+  return (
+    <div className="sn-autocomplete">
+      <input
+        value={open ? q : value ? `${value}${sel ? " (" + sel.c + ")" : ""}` : ""}
+        placeholder="ابحث عن دولة أو عملة (مثل ARS)…"
+        onChange={(e) => { setQ(e.target.value); setOpen(true); }}
+        onFocus={() => { setOpen(true); setQ(""); }}
+      />
+      {open && (
+        <div className="sn-sug-list">
+          <div className="sn-sug-head">
+            <span>اختر دولة الشحن</span>
+            <button type="button" className="sn-sug-close" onClick={() => setOpen(false)}>✕</button>
+          </div>
+          <button type="button" className="sn-sug-item sn-country-item" onClick={() => { onChange(""); setOpen(false); }}>
+            <span className="sn-sug-name">— مباشرة بالدولار —</span>
+            <span className="sn-cur-tag">USD</span>
+          </button>
+          {matches.map((c) => (
+            <button type="button" className="sn-sug-item sn-country-item" key={c.n} onClick={() => { onChange(c.n); setOpen(false); }}>
+              <span className="sn-sug-name">{c.n}</span>
+              <span className="sn-cur-tag">{c.c}</span>
+            </button>
+          ))}
+          {matches.length === 0 && <p className="sn-muted-txt" style={{ padding: "10px 12px" }}>لا توجد نتيجة.</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DeviceForm({ initial, settings, devices = [], contacts = [], agents = [], countries = [], onSaveRate, onCancel, onSave }) {
   const isNew = !initial;
   const [f, setF] = useState(
@@ -2582,12 +2675,7 @@ function DeviceForm({ initial, settings, devices = [], contacts = [], agents = [
 
       {/* (1) تكلفة الشحن — بالدولار، عبر دولة الشحن وعملتها */}
       <Field label="دولة الشحن (من أين تُشحن الاشتراك)">
-        <select value={f.country} onChange={(e) => set("country", e.target.value)}>
-          <option value="">— مباشرة بالدولار —</option>
-          {WORLD_SORTED.map((c) => (
-            <option key={c.n} value={c.n}>{c.n} ({c.c})</option>
-          ))}
-        </select>
+        <CountryPicker value={f.country} onChange={(v) => set("country", v)} />
       </Field>
       <Field
         label={
@@ -2800,11 +2888,16 @@ function PaymentSheet({ device, onCancel, onConfirm }) {
   );
 }
 
-function SupplierPaySheet({ device, onCancel, onConfirm }) {
+function SupplierPaySheet({ device, countries = [], onCancel, onConfirm }) {
   const [amount, setAmount] = useState(device.cost || "");
   const [date, setDate] = useState(todayStr());
   const expected = Number(device.cost) || 0;
   const matches = Number(amount) === expected;
+  const world = device.country ? WORLD_COUNTRIES.find((c) => c.n === device.country) : null;
+  const localCur = world ? world.c : "";
+  const rateEntry = device.country ? countries.find((c) => c.name === device.country) : null;
+  const perDollar = rateEntry && Number(rateEntry.perDollar) > 0 ? Number(rateEntry.perDollar) : null;
+  const localEq = perDollar ? Math.round((Number(amount) || 0) * perDollar * 100) / 100 : null;
   return (
     <Sheet title={`الدفع للمورّد — ${device.customerName}`} onClose={onCancel}>
       <div className="sn-end-preview">
@@ -2813,9 +2906,15 @@ function SupplierPaySheet({ device, onCancel, onConfirm }) {
       <Field label="المبلغ المدفوع للمورّد (بالدولار $)">
         <input type="number" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} />
       </Field>
+      {localEq != null && Number(amount) > 0 && (
+        <div className="sn-end-preview">
+          💱 ما يعادل بعملة {device.country}: <strong>{money(localEq)} {localCur}</strong>
+          <span className="sn-rate-hint"> (حسب 1$ = {perDollar} {localCur})</span>
+        </div>
+      )}
       {!matches && Number(amount) > 0 && (
         <p className="sn-hint" style={{ color: "#fbbf24" }}>
-          ⚠️ المبلغ ({money(Number(amount))}$) يختلف عن المفترض ({money(expected)}$). سيُعتمد المبلغ الذي أدخلته.
+          ⚠️ المبلغ ({money(Number(amount))}$) يختلف عن المفترض ({money(expected)}$). سيُعتمد المبلغ الذي أدخلته، وتُحدَّث تكلفة الشحن بالعملة المحلية تلقائياً.
         </p>
       )}
       <Field label="تاريخ الدفع للمورّد">
@@ -2913,12 +3012,7 @@ function RenewForm({ device, settings, countries = [], onSaveRate, onCancel, onC
       </div>
 
       <Field label="دولة الشحن">
-        <select value={info.country} onChange={(e) => set("country", e.target.value)}>
-          <option value="">— مباشرة بالدولار —</option>
-          {WORLD_SORTED.map((c) => (
-            <option key={c.n} value={c.n}>{c.n} ({c.c})</option>
-          ))}
-        </select>
+        <CountryPicker value={info.country} onChange={(v) => set("country", v)} />
       </Field>
       <Field label={info.country && hasRate ? `تكلفة الشحن (بعملة ${info.country} — ${localCur})` : "تكلفة الشحن (بالدولار $)"}>
         <input type="number" inputMode="decimal" value={info.costLocal} onChange={(e) => set("costLocal", e.target.value)} />
@@ -3556,6 +3650,14 @@ function Settings({ settings, onSave, onReset }) {
         <Field label="مهلة الدفع للمورّد (أيام من بداية الاشتراك)">
           <input type="number" value={s.supplierDays} onChange={(e) => set("supplierDays", Number(e.target.value) || 23)} />
         </Field>
+        <label className="sn-switch-row">
+          <span>🔊 أصوات التطبيق (دفع / شحن / حفظ)</span>
+          <input
+            type="checkbox"
+            checked={s.sounds !== false}
+            onChange={(e) => { set("sounds", e.target.checked); setSoundOn(e.target.checked); if (e.target.checked) playSound("save"); }}
+          />
+        </label>
       </section>
 
       <section className="sn-block">
@@ -4049,6 +4151,13 @@ const CSS = `
 .sn-sug-item{display:flex;flex-direction:column;gap:2px;width:100%;text-align:right;background:none;border:none;border-bottom:1px solid var(--border);padding:10px 12px;cursor:pointer;font-family:inherit}
 .sn-sug-item:last-child{border-bottom:none}
 .sn-sug-item:active{background:var(--surface)}
+.sn-country-item{flex-direction:row;justify-content:space-between;align-items:center}
+.sn-cur-tag{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:2px 9px;font-size:11px;font-weight:800;color:var(--accent);font-family:monospace;flex-shrink:0}
+.sn-switch-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:6px 2px;font-size:14px;font-weight:600;cursor:pointer}
+.sn-switch-row input[type=checkbox]{width:46px;height:26px;-webkit-appearance:none;appearance:none;background:var(--surface2);border:1px solid var(--border);border-radius:14px;position:relative;cursor:pointer;flex-shrink:0;transition:background .2s}
+.sn-switch-row input[type=checkbox]::after{content:"";position:absolute;top:2px;right:2px;width:20px;height:20px;border-radius:50%;background:#fff;transition:transform .2s}
+.sn-switch-row input[type=checkbox]:checked{background:var(--accent)}
+.sn-switch-row input[type=checkbox]:checked::after{transform:translateX(-20px)}
 .sn-sug-name{font-weight:700;font-size:13.5px;color:var(--text)}
 .sn-sug-sub{font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sn-lookup-input{width:100%;margin-bottom:8px}
