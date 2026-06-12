@@ -119,6 +119,8 @@ const DEFAULT_DATA = {
     rates: { USDT: 430, FCFA: 3.6, MRU: 1 }, // 1 وحدة من العملة → كم "عملة أساس"
     soonDays: 3,
     sounds: true,
+    pin: "", // رمز قفل التطبيق (فارغ = بلا قفل)
+    monthlyGoal: 0, // هدف ربح الشهر (بعملة الأساس) — 0 = بلا هدف
     msgCharged:
       "مرحباً {name} 👋\nتم شحن جهاز ستارلينك الخاص بك بنجاح ✅\n\n👤 الاسم: {name}\n📧 البريد: {email}\n🔢 رقم الحساب: {account}\n📅 تاريخ الشحن: {start}\n⏳ ينتهي الرصيد بتاريخ: {end}{debtline}{creditline}\n\nشكراً لتعاملك مع STAR NET ⭐",
     msgReminder:
@@ -133,6 +135,9 @@ const DEFAULT_DATA = {
   ], // سجل الدول/العملات: {id, name, currency, perDollar} — perDollar = كم وحدة = 1 دولار
   trash: [], // سلة المحذوفات: {device, transactions, deletedAt}
   contacts: [], // دفتر العملاء: إيميلات/بيانات محفوظة بدون عملية شحن
+  personColors: {}, // لون ثابت لكل شخص (مفتاح الهوية → لون)
+  agentPayouts: [], // تسويات المندوبين: {id, agentId, amount, date}
+  inventory: [], // المخزون: {id, name, category(device|accessory), qty, cost, costCurrency, price, currency}
 };
 
 /* ----------------------- أدوات مساعدة ----------------------- */
@@ -247,6 +252,31 @@ function fileToDataURL(file) {
 
 // ألوان مميّزة للمندوبين
 const AGENT_COLORS = ["#4f9dff", "#34d399", "#fbbf24", "#f472b6", "#a78bfa", "#fb7185", "#22d3ee", "#a3e635", "#fb923c", "#94a3b8"];
+// لوحة ألوان الأشخاص (12 لوناً متباعدة) — تُعيَّن تسلسلياً بلا تكرار
+const PERSON_PALETTE = ["#4da3ff", "#b388ff", "#ffb74d", "#4dd0c4", "#f06292", "#aed581", "#ff8a65", "#7986cb", "#ffd54f", "#4fc3f7", "#ba68c8", "#81c784"];
+// مفتاح هوية الشخص: الهاتف (أرقام) ثم البريد ثم الاسم
+function personKey(d) {
+  const ph = ((d.dialCode || "") + (d.phone || "")).replace(/\D/g, "");
+  if (ph) return "p:" + ph;
+  const em = (d.email || "").trim().toLowerCase();
+  if (em) return "e:" + em;
+  const nm = (d.customerName || "").trim().toLowerCase();
+  return nm ? "n:" + nm : "";
+}
+// تعيين لون ثابت لكل شخص بالترتيب التسلسلي (يُحفظ في personColors)
+function assignPersonColors(devices, existing) {
+  const map = { ...(existing || {}) };
+  let count = Object.keys(map).length;
+  (devices || []).forEach((d) => {
+    const k = personKey(d);
+    if (k && !(k in map)) { map[k] = PERSON_PALETTE[count % PERSON_PALETTE.length]; count++; }
+  });
+  return map;
+}
+function colorOf(d, personColors) {
+  const k = personKey(d);
+  return (personColors && personColors[k]) || PERSON_PALETTE[0];
+}
 function hexA(hex, a) {
   if (!hex) return "transparent";
   const h = hex.replace("#", "");
@@ -258,6 +288,22 @@ function hexA(hex, a) {
 function txProfit(tr, toBase) {
   const v = toBase(tr.amount, tr.currency);
   return tr.isExpense ? -v : v;
+}
+
+// سجل أرباح جهاز واحد: صفوف بالترتيب الزمني + الإجمالي (بعملة الأساس)
+function deviceLedger(deviceId, transactions, toBase) {
+  const txs = (transactions || [])
+    .filter((t) => t.deviceId === deviceId)
+    .slice()
+    .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+  let total = 0;
+  const rows = txs.map((t) => {
+    const base = toBase(t.amount, t.currency);
+    const signed = t.isExpense ? -base : base;
+    total += signed;
+    return { date: t.date, type: t.type, amount: Number(t.amount) || 0, currency: t.currency, isExpense: !!t.isExpense, signed: Math.round(signed * 100) / 100 };
+  });
+  return { rows, total: Math.round(total * 100) / 100 };
 }
 
 // نسخ نص إلى الحافظة (مع بديل احتياطي للبيئات المقيّدة)
@@ -294,6 +340,36 @@ function statusOf(device) {
   return { key: "active", label: "نشط", days: dl };
 }
 
+// عمر الدين بالأيام (منذ بداية الاشتراك)
+function debtAgeDays(device) {
+  if (!(device.debt > 0)) return 0;
+  const ref = device.startDate || device.createdAt;
+  if (!ref) return 0;
+  return Math.max(0, diffDays(ref, todayStr()));
+}
+
+// ما يستحق اليوم: تجديدات (منتهية/قريبة) + دفعات للمورّد مستحقّة + ديون العملاء
+function computeDue(data, settings) {
+  const soon = settings.soonDays || 3;
+  const today = todayStr();
+  const renewals = [], supplier = [], debts = [];
+  (data.devices || []).forEach((d) => {
+    if (d.broken) {
+      if (d.debt > 0) debts.push(d);
+      return;
+    }
+    const dl = diffDays(today, d.endDate);
+    if (dl <= soon) renewals.push({ d, dl });
+    if (d.cost > 0 && !d.costPaid) {
+      const due = d.supplierDueDate || d.endDate;
+      if (diffDays(today, due) <= 0) supplier.push(d);
+    }
+    if (d.debt > 0) debts.push(d);
+  });
+  renewals.sort((a, b) => a.dl - b.dl);
+  return { renewals, supplier, debts, total: renewals.length + supplier.length + debts.length };
+}
+
 /* ----------------------- طبقة التخزين ----------------------- */
 async function loadData() {
   try {
@@ -314,6 +390,23 @@ async function persist(data) {
   } catch (e) {
     /* تجاهل أخطاء التخزين */
   }
+}
+// نسخة احتياطية تلقائية يومية
+async function saveAutoBackup(data) {
+  try {
+    if (typeof window !== "undefined" && window.storage) {
+      await window.storage.set("starnet_autobackup", JSON.stringify({ date: todayStr(), data }));
+    }
+  } catch (e) {}
+}
+async function loadAutoBackup() {
+  try {
+    if (typeof window !== "undefined" && window.storage) {
+      const r = await window.storage.get("starnet_autobackup");
+      if (r && r.value) return JSON.parse(r.value);
+    }
+  } catch (e) {}
+  return null;
 }
 
 // ===== أصوات قصيرة لطيفة (Web Audio — بلا ملفات) =====
@@ -368,6 +461,48 @@ function reconcileIncome(data) {
 /* ============================================================
    المكوّن الرئيسي
    ============================================================ */
+function LockScreen({ pin, onUnlock }) {
+  const [entry, setEntry] = useState("");
+  const [err, setErr] = useState(false);
+  const press = (k) => {
+    setErr(false);
+    if (k === "del") { setEntry((e) => e.slice(0, -1)); return; }
+    const next = (entry + k).slice(0, 6);
+    setEntry(next);
+    if (next.length >= String(pin).length) {
+      if (next === String(pin)) { playSound("save"); onUnlock(); }
+      else { setErr(true); setEntry(""); playSound("delete"); }
+    }
+  };
+  return (
+    <div className="sn-root sn-lock" dir="rtl">
+      <style>{CSS}</style>
+      <div className="sn-lock-box">
+        <div className="sn-lock-logo">⭐</div>
+        <h2>STAR NET</h2>
+        <p>أدخل الرمز السرّي</p>
+        <div className="sn-lock-dots">
+          {Array.from({ length: String(pin).length }).map((_, i) => (
+            <span key={i} className={"sn-lock-dot" + (i < entry.length ? " on" : "")} />
+          ))}
+        </div>
+        {err && <p className="sn-lock-err">رمز خاطئ — حاول مجدّداً</p>}
+        <div className="sn-lock-pad">
+          {["1", "2", "3", "4", "5", "6", "7", "8", "9", "", "0", "del"].map((k, i) =>
+            k === "" ? (
+              <span key={i} />
+            ) : (
+              <button key={i} className="sn-lock-key" onClick={() => press(k)}>
+                {k === "del" ? "⌫" : k}
+              </button>
+            )
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function StarNetApp() {
   const [data, setData] = useState(null);
   const [tab, setTab] = useState("dashboard");
@@ -383,6 +518,7 @@ function StarNetApp() {
   const [viewAgent, setViewAgent] = useState(null); // agent being viewed
   const [confirm, setConfirm] = useState(null); // {text, onYes}
   const [toast, setToast] = useState("");
+  const [locked, setLocked] = useState(false);
   const loaded = useRef(false);
 
   // تحميل البيانات مرة واحدة
@@ -390,7 +526,7 @@ function StarNetApp() {
     (async () => {
       const saved = await loadData();
       if (saved && saved.devices) {
-        setData(reconcileIncome({
+        const fixed = reconcileIncome({
           ...DEFAULT_DATA,
           ...saved,
           settings: { ...DEFAULT_DATA.settings, ...(saved.settings || {}) },
@@ -398,7 +534,15 @@ function StarNetApp() {
           countries: saved.countries && saved.countries.length ? saved.countries : DEFAULT_DATA.countries,
           trash: saved.trash || [],
           contacts: saved.contacts || [],
-        }));
+          personColors: saved.personColors || {},
+        });
+        fixed.personColors = assignPersonColors(fixed.devices, fixed.personColors);
+        setData(fixed);
+        if (fixed.settings && fixed.settings.pin) setLocked(true);
+        try {
+          const bk = await loadAutoBackup();
+          if (!bk || bk.date !== todayStr()) await saveAutoBackup(fixed);
+        } catch (e) {}
       } else {
         setData(DEFAULT_DATA);
       }
@@ -410,6 +554,23 @@ function StarNetApp() {
   // حفظ تلقائي عند أي تغيير
   useEffect(() => {
     if (loaded.current && data) persist(data);
+  }, [data]);
+
+  // تنبيه تلقائي عند فتح التطبيق بما يستحق اليوم (إن سُمح بالتنبيهات)
+  const notified = useRef(false);
+  useEffect(() => {
+    if (!data || notified.current) return;
+    notified.current = true;
+    try {
+      if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+        const due = computeDue(data, data.settings);
+        if (due.total > 0) {
+          new Notification("STAR NET ⭐ — تستحق اليوم", {
+            body: `🔄 تجديدات: ${due.renewals.length}  •  🏷️ للمورّد: ${due.supplier.length}  •  💰 ديون: ${due.debts.length}`,
+          });
+        }
+      }
+    } catch (e) {}
   }, [data]);
 
   const flash = (m) => {
@@ -517,7 +678,7 @@ function StarNetApp() {
           contacts = [...contacts, { ...cData, id: uid(), createdAt: todayStr(), note: "" }];
         }
       }
-      return { ...d, devices, transactions, contacts };
+      return { ...d, devices, transactions, contacts, personColors: assignPersonColors(devices, d.personColors) };
     });
     flash(isNew ? "تمت إضافة الجهاز ✅" : "تم حفظ التعديلات ✅");
     playSound(isNew ? "charge" : "save");
@@ -816,6 +977,102 @@ function StarNetApp() {
     playSound("save");
   }
 
+  function settleAgent(agent, amount) {
+    const amt = Number(amount) || 0;
+    if (amt <= 0) return;
+    setData((d) => ({
+      ...d,
+      agentPayouts: [{ id: uid(), agentId: agent.id, amount: amt, date: todayStr() }, ...(d.agentPayouts || [])],
+    }));
+    flash(`سُجّل تسليم ${money(amt)} للمندوب ✅`);
+    playSound("payment");
+  }
+
+  function addInvItem(info) {
+    setData((d) => ({
+      ...d,
+      inventory: [
+        { id: uid(), name: info.name, category: info.category || "device", qty: Number(info.qty) || 0, cost: Number(info.cost) || 0, costCurrency: info.costCurrency || "USDT", price: Number(info.price) || 0, currency: info.currency || "MRU", createdAt: todayStr() },
+        ...(d.inventory || []),
+      ],
+    }));
+    flash("أُضيف الصنف للمخزون ✅");
+    playSound("save");
+  }
+  function adjustInvQty(id, delta) {
+    setData((d) => ({ ...d, inventory: (d.inventory || []).map((it) => (it.id === id ? { ...it, qty: Math.max(0, (Number(it.qty) || 0) + delta) } : it)) }));
+  }
+  function deleteInvItem(id) {
+    setData((d) => ({ ...d, inventory: (d.inventory || []).filter((it) => it.id !== id) }));
+    flash("حُذف الصنف");
+  }
+  function sellInvItem(item, customerName) {
+    setData((d) => {
+      const inventory = (d.inventory || []).map((it) => (it.id === item.id ? { ...it, qty: Math.max(0, (Number(it.qty) || 0) - 1) } : it));
+      const saleId = uid();
+      const txs = [...d.transactions];
+      txs.unshift({ id: uid(), saleId, date: todayStr(), amount: Number(item.price) || 0, currency: item.currency || "MRU", type: "بيع مخزون", service: item.name, customerName: customerName || "", note: item.category === "device" ? "جهاز" : "اكسسوار" });
+      if (Number(item.cost) > 0) {
+        txs.unshift({ id: uid(), saleId, date: todayStr(), amount: Number(item.cost) || 0, currency: item.costCurrency || "USDT", isExpense: true, type: "تكلفة مخزون", service: item.name, customerName: customerName || "" });
+      }
+      return { ...d, inventory, transactions: txs };
+    });
+    flash("تم تسجيل البيع ✅");
+    playSound("payment");
+  }
+
+  function addService(info) {
+    const svcId = uid();
+    const amt = Number(info.amount) || 0;
+    const cost = Number(info.cost) || 0;
+    setData((d) => {
+      const txs = [...d.transactions];
+      txs.unshift({ id: uid(), svcId, date: info.date || todayStr(), amount: amt, currency: info.currency || "MRU", type: "خدمة", service: info.service || "خدمة", customerName: info.customerName || "", note: info.note || "" });
+      if (cost > 0) {
+        txs.unshift({ id: uid(), svcId, date: info.date || todayStr(), amount: cost, currency: info.costCurrency || "MRU", isExpense: true, type: "تكلفة خدمة", service: info.service || "خدمة", customerName: info.customerName || "" });
+      }
+      return { ...d, transactions: txs };
+    });
+    flash("تمت إضافة الخدمة ✅");
+    playSound("payment");
+  }
+  function deleteService(svcId) {
+    setData((d) => ({ ...d, transactions: d.transactions.filter((t) => t.svcId !== svcId) }));
+    flash("حُذفت الخدمة");
+  }
+
+  function addExpense(info) {
+    setData((d) => ({
+      ...d,
+      transactions: [
+        { id: uid(), date: info.date || todayStr(), amount: Number(info.amount) || 0, currency: info.currency || "MRU", isExpense: true, type: "مصروف عام", note: info.note || "" },
+        ...d.transactions,
+      ],
+    }));
+    flash("تم تسجيل المصروف ✅");
+    playSound("payment");
+  }
+  function deleteExpense(id) {
+    setData((d) => ({ ...d, transactions: d.transactions.filter((t) => t.id !== id) }));
+    flash("حُذف المصروف");
+  }
+
+  async function restoreAutoBackup() {
+    const bk = await loadAutoBackup();
+    if (!bk || !bk.data) { flash("لا توجد نسخة تلقائية بعد"); return; }
+    setConfirm({
+      text: `استعادة النسخة التلقائية بتاريخ ${fmtDate(bk.date)}؟ ستحلّ محلّ البيانات الحالية.`,
+      onYes: () => {
+        const fixed = reconcileIncome(bk.data);
+        fixed.personColors = assignPersonColors(fixed.devices, fixed.personColors);
+        setData(fixed);
+        setPanel(null);
+        flash("تمت الاستعادة ✅");
+        setConfirm(null);
+      },
+    });
+  }
+
   // دفتر العملاء (إيميلات/بيانات بدون شحن)
   function saveContact(c) {
     setData((d) => {
@@ -914,7 +1171,8 @@ function StarNetApp() {
         if (ci >= 0) contacts = contacts.map((c, i) => (i === ci ? { ...c, ...cData } : c));
         else contacts = [...contacts, { ...cData, id: uid(), createdAt: todayStr(), note: "" }];
       });
-      return { ...d, devices: [...newDevices, ...d.devices], transactions: [...newTx, ...d.transactions], contacts };
+      const allDevices = [...newDevices, ...d.devices];
+      return { ...d, devices: allDevices, transactions: [...newTx, ...d.transactions], contacts, personColors: assignPersonColors(allDevices, d.personColors) };
     });
     flash(`تم استيراد ${valid.length} جهازاً ✅`);
     playSound("charge");
@@ -928,6 +1186,10 @@ function StarNetApp() {
         <p>جارٍ تحميل بيانات STAR NET…</p>
       </div>
     );
+  }
+
+  if (locked && data.settings.pin) {
+    return <LockScreen pin={data.settings.pin} onUnlock={() => setLocked(false)} />;
   }
 
   return (
@@ -989,6 +1251,26 @@ function StarNetApp() {
                 <span className="sn-drawer-ic">📊</span>
                 <span className="sn-drawer-lbl">استيراد / تصدير Excel</span>
               </button>
+              <button className="sn-drawer-item" onClick={() => { setPanel("services"); setDrawer(false); }}>
+                <span className="sn-drawer-ic">🛠️</span>
+                <span className="sn-drawer-lbl">الخدمات (تفعيل/توثيق…)</span>
+              </button>
+              <button className="sn-drawer-item" onClick={() => { setPanel("inventory"); setDrawer(false); }}>
+                <span className="sn-drawer-ic">📦</span>
+                <span className="sn-drawer-lbl">المخزون (أجهزة/اكسسوارات)</span>
+              </button>
+              <button className="sn-drawer-item" onClick={() => { setPanel("calendar"); setDrawer(false); }}>
+                <span className="sn-drawer-ic">🗓️</span>
+                <span className="sn-drawer-lbl">تقويم التجديدات</span>
+              </button>
+              <button className="sn-drawer-item" onClick={() => { setPanel("calc"); setDrawer(false); }}>
+                <span className="sn-drawer-ic">💹</span>
+                <span className="sn-drawer-lbl">حاسبة سعر البيع</span>
+              </button>
+              <button className="sn-drawer-item" onClick={() => { setPanel("expenses"); setDrawer(false); }}>
+                <span className="sn-drawer-ic">💸</span>
+                <span className="sn-drawer-lbl">المصروفات العامة</span>
+              </button>
               <button className="sn-drawer-item" onClick={() => { setPanel("backup"); setDrawer(false); }}>
                 <span className="sn-drawer-ic">☁️</span>
                 <span className="sn-drawer-lbl">النسخ الاحتياطي ودرايف</span>
@@ -1021,6 +1303,7 @@ function StarNetApp() {
         {tab === "devices" && (
           <Devices
             data={data}
+            toBase={toBase}
             onEdit={setEditing}
             onRenew={setRenewing}
             onDelete={deleteDevice}
@@ -1041,6 +1324,7 @@ function StarNetApp() {
             onEditAgent={setEditingAgent}
             onDeleteAgent={deleteAgent}
             onViewAgent={setViewAgent}
+            onSettle={settleAgent}
           />
         )}
         {tab === "reports" && <Reports data={data} toBase={toBase} settings={settings} />}
@@ -1111,6 +1395,7 @@ function StarNetApp() {
         <ToolsPanel
           kind={panel}
           data={data}
+          toBase={toBase}
           onClose={() => setPanel(null)}
           onAddCountry={() => setEditingCountry("new")}
           onEditCountry={setEditingCountry}
@@ -1119,10 +1404,19 @@ function StarNetApp() {
           onEditContact={setEditingContact}
           onDeleteContact={deleteContact}
           onImportExcel={importDevicesFromRows}
-          onImport={(d) => { setData(d); flash("تم استيراد البيانات ✅"); }}
+          onImport={(d) => { const fixed = reconcileIncome(d); fixed.personColors = assignPersonColors(fixed.devices, fixed.personColors); setData(fixed); flash("تم استيراد البيانات ✅"); }}
           onRestoreTrash={restoreTrash}
           onPurgeTrash={purgeTrash}
           onEmptyTrash={emptyTrash}
+          onRestoreAuto={restoreAutoBackup}
+          onAddExpense={addExpense}
+          onDeleteExpense={deleteExpense}
+          onAddService={addService}
+          onDeleteService={deleteService}
+          onAddInv={addInvItem}
+          onAdjustInv={adjustInvQty}
+          onDeleteInv={deleteInvItem}
+          onSellInv={sellInvItem}
         />
       )}
       {editingCountry && (
@@ -1437,6 +1731,94 @@ function QuickLookup({ data, onWhats }) {
   );
 }
 
+function DueToday({ data, settings, onRenew, onWhats, onClearDebt, onMarkPaid, goDevices }) {
+  const [open, setOpen] = useState(true);
+  const due = useMemo(() => computeDue(data, settings), [data, settings]);
+  const [notifOn, setNotifOn] = useState(typeof Notification !== "undefined" && Notification.permission === "granted");
+  if (due.total === 0) {
+    return (
+      <section className="sn-due sn-due--empty">
+        <span>📅 تستحق اليوم</span>
+        <span className="sn-due-clear">لا شيء مستحقّ اليوم — ممتاز! ✅</span>
+      </section>
+    );
+  }
+  const enableNotif = () => {
+    if (typeof Notification === "undefined") return;
+    Notification.requestPermission().then((p) => {
+      setNotifOn(p === "granted");
+      if (p === "granted") {
+        try { new Notification("STAR NET ⭐", { body: `لديك ${due.total} مهمّة مستحقّة اليوم` }); } catch (e) {}
+      }
+    });
+  };
+  return (
+    <section className="sn-due">
+      <button className="sn-due-head" onClick={() => setOpen(!open)}>
+        <span>📅 تستحق اليوم <span className="sn-due-count">{due.total}</span></span>
+        <span>{open ? "▾" : "◂"}</span>
+      </button>
+      {open && (
+        <div className="sn-due-body">
+          {!notifOn && typeof Notification !== "undefined" && (
+            <button className="sn-due-notif" onClick={enableNotif}>🔔 تفعيل التنبيهات على الهاتف</button>
+          )}
+          {due.renewals.length > 0 && (
+            <div className="sn-due-group">
+              <div className="sn-due-glabel">🔄 تجديدات ({due.renewals.length})</div>
+              {due.renewals.map(({ d, dl }) => (
+                <div className="sn-due-item" key={d.id}>
+                  <div className="sn-due-info">
+                    <span className="sn-due-name">{d.customerName || "—"}</span>
+                    <span className="sn-due-meta">{dl < 0 ? `منتهٍ منذ ${-dl}ي` : dl === 0 ? "ينتهي اليوم" : `بعد ${dl}ي`}</span>
+                  </div>
+                  <div className="sn-due-acts">
+                    <button className="sn-due-btn sn-due-btn--wa" onClick={() => onWhats(d, "reminder")}>واتساب</button>
+                    <button className="sn-due-btn sn-due-btn--go" onClick={() => onRenew(d)}>تجديد</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          {due.supplier.length > 0 && (
+            <div className="sn-due-group">
+              <div className="sn-due-glabel">🏷️ دفعات للمورّد ({due.supplier.length})</div>
+              {due.supplier.map((d) => (
+                <div className="sn-due-item" key={d.id}>
+                  <div className="sn-due-info">
+                    <span className="sn-due-name">{d.customerName || "—"}</span>
+                    <span className="sn-due-meta">{money(d.cost)}$ — موعد {fmtDate(d.supplierDueDate || d.endDate)}</span>
+                  </div>
+                  <div className="sn-due-acts">
+                    <button className="sn-due-btn sn-due-btn--go" onClick={() => onMarkPaid(d, true)}>دفعت</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          {due.debts.length > 0 && (
+            <div className="sn-due-group">
+              <div className="sn-due-glabel">💰 ديون العملاء ({due.debts.length})</div>
+              {due.debts.map((d) => (
+                <div className="sn-due-item" key={d.id}>
+                  <div className="sn-due-info">
+                    <span className="sn-due-name">{d.customerName || "—"}</span>
+                    <span className="sn-due-meta sn-neg">{money(d.debt)} {symbolOf(d.debtCurrency || d.currency)}{debtAgeDays(d) >= 7 ? ` • متأخّر ${debtAgeDays(d)}ي` : ""}</span>
+                  </div>
+                  <div className="sn-due-acts">
+                    <button className="sn-due-btn sn-due-btn--wa" onClick={() => onWhats(d, "reminder")}>واتساب</button>
+                    <button className="sn-due-btn sn-due-btn--go" onClick={() => onClearDebt(d)}>حصّلت</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function Dashboard({ data, settings, toBase, onRenew, onMarkPaid, onBroken, onClearDebt, onWhats, onAdd, goDevices }) {
   const t = todayStr();
   const stats = useMemo(() => {
@@ -1450,13 +1832,17 @@ function Dashboard({ data, settings, toBase, onRenew, onMarkPaid, onBroken, onCl
       if (!d.costPaid && d.cost && !d.broken) supplierUnpaid += toBase(d.cost, d.costCurrency || "USDT");
     });
     const month = t.slice(0, 7);
-    let dayProfit = 0, monthProfit = 0;
+    let dayProfit = 0, monthProfit = 0, dayIncome = 0, dayExpense = 0;
     data.transactions.forEach((tr) => {
       const p = txProfit(tr, toBase);
-      if (tr.date === t) dayProfit += p;
+      if (tr.date === t) {
+        dayProfit += p;
+        if (tr.isExpense) dayExpense += toBase(tr.amount, tr.currency);
+        else dayIncome += toBase(tr.amount, tr.currency);
+      }
       if (tr.date.slice(0, 7) === month) monthProfit += p;
     });
-    return { active, urgent, expired, debtBase, supplierUnpaid, dayProfit, monthProfit, total: data.devices.length };
+    return { active, urgent, expired, debtBase, supplierUnpaid, dayProfit, monthProfit, dayIncome, dayExpense, total: data.devices.length };
   }, [data, toBase, t]);
 
   // أجهزة يجب دفع تكلفتها للمورّد (غير مدفوعة) — مرتبة بحسب قرب الموعد
@@ -1476,6 +1862,7 @@ function Dashboard({ data, settings, toBase, onRenew, onMarkPaid, onBroken, onCl
 
   return (
     <div className="sn-page">
+      <DueToday data={data} settings={settings} onRenew={onRenew} onWhats={onWhats} onClearDebt={onClearDebt} onMarkPaid={onMarkPaid} goDevices={goDevices} />
       <section className="sn-profit-grid">
         <div className="sn-profit sn-profit--day">
           <span className="sn-profit-lbl">أرباح اليوم</span>
@@ -1484,6 +1871,26 @@ function Dashboard({ data, settings, toBase, onRenew, onMarkPaid, onBroken, onCl
         <div className="sn-profit sn-profit--month">
           <span className="sn-profit-lbl">أرباح الشهر</span>
           <strong className={stats.monthProfit < 0 ? "sn-neg" : ""}>{money(stats.monthProfit)} <em>عملة</em></strong>
+        </div>
+      </section>
+
+      {settings.monthlyGoal > 0 && (
+        <section className="sn-goal">
+          <div className="sn-goal-top">
+            <span>🎯 هدف الشهر: {money(settings.monthlyGoal)} عملة</span>
+            <span className="sn-goal-pct">{Math.round(Math.max(0, stats.monthProfit) / settings.monthlyGoal * 100)}%</span>
+          </div>
+          <div className="sn-goal-bar"><div className="sn-goal-fill" style={{ width: Math.min(100, Math.max(0, stats.monthProfit) / settings.monthlyGoal * 100) + "%" }} /></div>
+          <span className="sn-goal-sub">حقّقت {money(Math.max(0, stats.monthProfit))} — يتبقّى {money(Math.max(0, settings.monthlyGoal - stats.monthProfit))} عملة</span>
+        </section>
+      )}
+
+      <section className="sn-close">
+        <div className="sn-close-h">🧮 إغلاق اليوم</div>
+        <div className="sn-close-grid">
+          <div className="sn-close-c"><span>دخل اليوم</span><strong className="sn-pos">{money(stats.dayIncome)}</strong></div>
+          <div className="sn-close-c"><span>مصروفات اليوم</span><strong className="sn-neg">{money(stats.dayExpense)}</strong></div>
+          <div className="sn-close-c"><span>صافي اليوم</span><strong className={stats.dayProfit < 0 ? "sn-neg" : "sn-pos"}>{money(stats.dayProfit)}</strong></div>
         </div>
       </section>
 
@@ -1632,7 +2039,7 @@ function AlertCard({ d, onRenew, onBroken, onWhats }) {
 /* ============================================================
    قائمة الأجهزة
    ============================================================ */
-function Devices({ data, onEdit, onRenew, onDelete, onClearDebt, onMarkPaid, onBroken, onUnbreak, onCopy, onExport, onWhats }) {
+function Devices({ data, toBase, onEdit, onRenew, onDelete, onClearDebt, onMarkPaid, onBroken, onUnbreak, onCopy, onExport, onWhats }) {
   const [q, setQ] = useState("");
   const [filter, setFilter] = useState("all");
 
@@ -1673,6 +2080,7 @@ function Devices({ data, onEdit, onRenew, onDelete, onClearDebt, onMarkPaid, onB
       if (filter === "supplier" && (d.costPaid || !d.cost || d.broken)) return false;
       if (filter === "loss" && devProfit(d) >= 0) return false;
       if (filter === "dup" && dupReasons(d).length === 0) return false;
+      if (filter.startsWith("tag:") && (d.tag || "") !== filter.slice(4)) return false;
       if (q) {
         const hay = `${d.customerName} ${d.phone} ${d.accountNumber} ${d.email}`.toLowerCase();
         if (!hay.includes(q.toLowerCase())) return false;
@@ -1696,16 +2104,36 @@ function Devices({ data, onEdit, onRenew, onDelete, onClearDebt, onMarkPaid, onB
     ["loss", "📉 خسارة"],
     ["broken", "معطّلة"],
     ["dup", "🔁 مكرّرة"],
+    ...[...new Set(data.devices.map((d) => d.tag).filter(Boolean))].map((t) => ["tag:" + t, "🏷️ " + t]),
   ];
 
   return (
     <div className="sn-page">
-      <input
-        className="sn-search"
-        placeholder="🔎 بحث بالاسم أو الهاتف أو رقم الحساب…"
-        value={q}
-        onChange={(e) => setQ(e.target.value)}
-      />
+      <div className="sn-search-row">
+        <input
+          className="sn-search"
+          placeholder="🔎 بحث بالاسم أو الهاتف أو رقم الحساب…"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+        />
+        <button
+          type="button"
+          className="sn-mic"
+          aria-label="بحث صوتي"
+          onClick={() => {
+            const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+            if (!SR) { alert("البحث الصوتي غير مدعوم في هذا المتصفّح."); return; }
+            try {
+              const r = new SR();
+              r.lang = "ar-SA";
+              r.interimResults = false;
+              r.maxAlternatives = 1;
+              r.onresult = (ev) => { const t = ev.results[0][0].transcript || ""; setQ(t.trim()); };
+              r.start();
+            } catch (e) {}
+          }}
+        >🎤</button>
+      </div>
       <div className="sn-chips">
         {filters.map(([k, l]) => (
           <button
@@ -1745,6 +2173,9 @@ function Devices({ data, onEdit, onRenew, onDelete, onClearDebt, onMarkPaid, onB
             countries={data.countries || []}
             balance={customerBalance(d, data, data.settings.rates)}
             dupReasons={dupReasons(d)}
+            personColor={colorOf(d, data.personColors)}
+            toBase={toBase}
+            txs={data.transactions || []}
             onEdit={onEdit}
             onRenew={onRenew}
             onDelete={onDelete}
@@ -1802,18 +2233,60 @@ function HoldIcon({ icon, title, onHold, danger }) {
   );
 }
 
-function DeviceCard({ d, agents = [], countries = [], balance, compact = false, dupReasons = [], onEdit, onRenew, onDelete, onClearDebt, onMarkPaid, onBroken, onUnbreak, onCopy, onExport, onWhats }) {
+function CField({ k, v, danger, copy, onCopy, color, secret }) {
+  const [show, setShow] = useState(false);
+  const display = secret && v ? (show ? v : "••••••••") : (v || "—");
+  return (
+    <div className="sn-cf">
+      <span className="sn-cf-k">{k}</span>
+      <span className="sn-cf-v">
+        <span
+          className={danger ? "sn-neg" : ""}
+          style={color ? { color, fontWeight: 800 } : secret ? { cursor: "pointer", letterSpacing: show ? 0 : 2 } : undefined}
+          onClick={secret && v ? () => setShow((s) => !s) : undefined}
+        >{display}</span>
+        {secret && v && (
+          <button className="sn-copy-ic" onClick={() => setShow((s) => !s)} title="إظهار/إخفاء">{show ? "🙈" : "👁️"}</button>
+        )}
+        {copy && onCopy && (
+          <button className="sn-copy-ic" onClick={() => onCopy(copy, k)} title="نسخ" aria-label="نسخ">⎘</button>
+        )}
+      </span>
+    </div>
+  );
+}
+
+function DeviceCard({ d, agents = [], countries = [], balance, compact = false, dupReasons = [], personColor, toBase, txs = [], onEdit, onRenew, onDelete, onClearDebt, onMarkPaid, onBroken, onUnbreak, onCopy, onExport, onWhats }) {
   const [open, setOpen] = useState(false);
+  const [showProfit, setShowProfit] = useState(false);
+  const [showSecret, setShowSecret] = useState(false);
+  const [showMore, setShowMore] = useState(false);
   const s = statusOf(d);
   const agent = agents.find((a) => a.id === d.agentId);
-  const agentColor = agent && agent.color ? agent.color : "";
   const countryCur = d.country ? (WORLD_COUNTRIES.find((c) => c.n === d.country) || {}).c : "";
-  // تحذير: لم يسدّد الزبون + قارب الانتهاء (≤3 أيام) + لم تدفع للمورّد
+  const pc = personColor || "#4da3ff";
   const riskNoPay = d.debt > 0 && ["urgent", "soon", "expired"].includes(s.key) && !d.costPaid && d.cost > 0 && !d.broken;
+  // ترتيب الجهاز ضمن أجهزة نفس الشخص
+  const sameDevs = balance && balance.devices && balance.devices.length ? balance.devices : [d];
+  const devIdx = sameDevs.findIndex((x) => x.id === d.id);
+  const devNo = devIdx >= 0 ? devIdx + 1 : 1;
+  const devCount = sameDevs.length;
+  const anyLate = sameDevs.some((x) => x.debt > 0 && debtAgeDays(x) >= 14);
+  const anyDebt = sameDevs.some((x) => x.debt > 0);
+  const reliability = anyLate
+    ? { t: "⚠️ متعثّر الدفع", c: "sn-fin--late" }
+    : !anyDebt && sameDevs.some((x) => x.totalCustomer > 0)
+    ? { t: "⭐ زبون موثوق", c: "sn-fin--good" }
+    : null;
   const cardStyle = {};
-  if (agentColor) cardStyle.background = hexA(agentColor, 0.1);
-  cardStyle.borderInlineStartColor = riskNoPay ? "#f43f5e" : agentColor || undefined;
-  if (riskNoPay) cardStyle.borderInlineStartWidth = "5px";
+  cardStyle.borderInlineStartColor = riskNoPay ? "#f43f5e" : pc;
+  cardStyle.borderInlineStartWidth = riskNoPay ? "6px" : "5px";
+  const ledger = deviceLedger(d.id, txs, toBase || ((a) => Number(a) || 0));
+  // برنامج الولاء: عدد التجديدات لكل أجهزة هذا الشخص
+  const personDevIds = new Set(sameDevs.map((x) => x.id));
+  const renewCount = (txs || []).filter((t) => t.type === "تجديد" && personDevIds.has(t.deviceId)).length;
+  const loyal = renewCount >= 5;
+  const telNum = ((d.dialCode || "") + (d.phone || "")).replace(/\D/g, "");
   const copyAll = () => {
     const lines = [
       `الاسم: ${d.customerName || "—"}`,
@@ -1827,175 +2300,169 @@ function DeviceCard({ d, agents = [], countries = [], balance, compact = false, 
   };
   return (
     <div className={"sn-card sn-card--" + s.key + (riskNoPay ? " sn-card--risk" : "")} style={cardStyle}>
-      {riskNoPay && (
-        <div className="sn-risk-banner">🚫 لم يسدّد الزبون وقارب الانتهاء — لا تدفع للمورّد!</div>
-      )}
+      {riskNoPay && <div className="sn-risk-banner">🚫 لم يسدّد الزبون وقارب الانتهاء — لا تدفع للمورّد!</div>}
       <div className="sn-card-top" onClick={() => setOpen(!open)}>
         <div className="sn-card-id">
           <span className="sn-card-name">
-            {agentColor && <span className="sn-agent-dot" style={{ background: agentColor }} />}
+            <span className="sn-agent-dot" style={{ background: pc }} />
             {d.customerName}
+            {devCount > 1 && (
+              <span className="sn-dev-tag" style={{ borderColor: hexA(pc, 0.6), color: pc }}>جهاز {devNo}/{devCount}</span>
+            )}
           </span>
-          <span className="sn-card-phone">{d.phone || "بدون رقم"}</span>
-          {dupReasons.length > 0 && (
-            <span className="sn-dup-badge" title={"مكرّر: " + dupReasons.join("، ")}>
-              🔁 مكرّر ({dupReasons.join("، ")})
-            </span>
-          )}
-          {(d.originType || d.originNote) && (
-            <span className={"sn-origin-badge sn-origin-badge--" + (d.originType || "note")}>
-              {d.originType === "hadDebt" ? "⚠️ دين سابق" : d.originType === "clean" ? "✅ بلا دين سابق" : "📌 ملاحظة"}
-            </span>
-          )}
+          <span className="sn-card-sub" dir="ltr">
+            {[(d.phone || "").trim(), (d.email || "").trim()].filter(Boolean).join(" · ") || "بدون رقم"}
+          </span>
           <div className="sn-fin-badges">
+            <span className={"sn-badge sn-badge--" + s.key}>{s.label}</span>
+            {d.tag && <span className="sn-fin sn-tag-badge">🏷️ {d.tag}</span>}
+            {loyal && <span className="sn-fin sn-fin--good">🎁 يستحق خصم ({renewCount} تجديد)</span>}
+            {reliability && <span className={"sn-fin " + reliability.c}>{reliability.t}</span>}
+            {dupReasons.length > 0 && (
+              <span className="sn-dup-badge" title={"مكرّر: " + dupReasons.join("، ")}>🔁 مكرّر</span>
+            )}
+            {(d.originType || d.originNote) && (
+              <span className={"sn-origin-badge sn-origin-badge--" + (d.originType || "note")}>
+                {d.originType === "hadDebt" ? "⚠️ دين سابق" : d.originType === "clean" ? "✅ بلا دين" : "📌 ملاحظة"}
+              </span>
+            )}
             {balance && balance.count > 1 && (
               <span className={"sn-fin " + (balance.net > 0 ? "sn-fin--debt" : balance.net < 0 ? "sn-fin--cred" : "sn-fin--link")}>
-                👤 نفس الزبون ({balance.count} أجهزة)
+                👤 نفس الزبون ({balance.count})
                 {balance.net > 0 ? ` • عليه ${money(balance.net)}` : balance.net < 0 ? ` • له ${money(-balance.net)}` : ""}
               </span>
             )}
             {d.debt > 0 && (
-              <span className="sn-fin sn-fin--debt">💰 عليه دين {money(d.debt)} {symbolOf(d.debtCurrency || d.currency)}</span>
+              <span className="sn-fin sn-fin--debt" style={{ color: pc }}>💰 دين {money(d.debt)} {symbolOf(d.debtCurrency || d.currency)}</span>
+            )}
+            {d.debt > 0 && debtAgeDays(d) >= 7 && (
+              <span className="sn-fin sn-fin--late">⏳ متأخّر {debtAgeDays(d)}ي</span>
             )}
             {d.credit > 0 && (
-              <span className="sn-fin sn-fin--cred">💳 له رصيد {money(d.credit)} {symbolOf(d.creditCurrency || d.currency)}</span>
+              <span className="sn-fin sn-fin--cred">💳 له {money(d.credit)} {symbolOf(d.creditCurrency || d.currency)}</span>
             )}
-            {d.totalCustomer > 0 && !d.debt && (
-              <span className="sn-fin sn-fin--ok">✅ دفع كاملاً</span>
-            )}
+            {d.totalCustomer > 0 && !d.debt && <span className="sn-fin sn-fin--ok">✅ دفع كاملاً</span>}
             {!d.costPaid && d.cost > 0 && !d.broken && (
-              <span className="sn-fin sn-fin--sup">🏷️ علينا للمورّد {money(d.cost)}$</span>
+              <span className="sn-fin sn-fin--sup">🏷️ للمورّد {money(d.cost)}$</span>
             )}
-            {d.costPaid && d.cost > 0 && (
-              <span className="sn-fin sn-fin--paid">🏷️ سُدّد للمورّد</span>
-            )}
-            {d.broken && <span className="sn-fin sn-fin--brk">🔧 معطّل (مكسب لنا)</span>}
+            {d.costPaid && d.cost > 0 && <span className="sn-fin sn-fin--paid">🏷️ سُدّد للمورّد</span>}
+            {d.broken && <span className="sn-fin sn-fin--brk">🔧 معطّل</span>}
           </div>
         </div>
         <div className="sn-card-status">
           <div className="sn-quick-acts" onClick={(e) => e.stopPropagation()}>
             {onEdit && <button className="sn-quick-btn" onClick={() => onEdit(d)} title="تعديل" aria-label="تعديل">✏️</button>}
-            {onWhats && <button className="sn-quick-btn" onClick={() => onWhats(d, "reminder")} title="تذكير" aria-label="تذكير">⏰</button>}
+            {telNum && <button className="sn-quick-btn" onClick={() => window.open("tel:" + telNum)} title="اتصال" aria-label="اتصال">📞</button>}
+            {onWhats && <button className="sn-quick-btn" onClick={() => onWhats(d, "reminder")} title="واتساب" aria-label="واتساب">💬</button>}
+            <button className={"sn-quick-btn" + (showProfit ? " sn-quick-on" : "")} onClick={() => setShowProfit(!showProfit)} title="الأرباح" aria-label="الأرباح">💰</button>
             {onExport && <button className="sn-quick-btn" onClick={() => onExport(d)} title="PDF" aria-label="PDF">📄</button>}
             {onDelete && <HoldIcon icon="🗑️" title="حذف (اضغط مطوّلاً)" danger onHold={() => onDelete(d)} />}
           </div>
-          <span className={"sn-badge sn-badge--" + s.key}>{s.label}</span>
           <Countdown endDate={d.endDate} broken={d.broken} compact />
         </div>
       </div>
 
+      {showProfit && (
+        <div className="sn-profit-panel">
+          <div className="sn-profit-head">💰 سجل أرباح هذا الجهاز</div>
+          {ledger.rows.length === 0 ? (
+            <p className="sn-muted-txt">لا توجد عمليات بعد.</p>
+          ) : (
+            ledger.rows.map((r, i) => (
+              <div className="sn-profit-row" key={i}>
+                <span className="sn-profit-date">{fmtDate(r.date)}</span>
+                <span className="sn-profit-type">{r.type}{r.isExpense ? " (للمورّد)" : ""}</span>
+                <span className={"sn-profit-amt " + (r.signed >= 0 ? "sn-pos" : "sn-neg")}>
+                  {r.signed >= 0 ? "+" : ""}{money(r.signed)}
+                </span>
+              </div>
+            ))
+          )}
+          <div className="sn-profit-total">
+            <span>إجمالي ربح هذا الجهاز</span>
+            <span className={ledger.total >= 0 ? "sn-pos" : "sn-neg"}>{ledger.total >= 0 ? "+" : ""}{money(ledger.total)} عملة</span>
+          </div>
+          <p className="sn-rate-hint">يُحسب بسعر الصرف الحالي. الزبون يدفع بعملته والمورّد بالدولار.</p>
+        </div>
+      )}
+
       {open && (
         <div className="sn-card-body">
-          <Row k="الاسم" v={d.customerName} onCopy={onCopy} copyLabel="الاسم" />
-          <Row k="رقم الهاتف" v={`${d.dialCode || ""} ${d.phone || ""}`.trim()} onCopy={onCopy} copyLabel="رقم الهاتف" />
-          <Row k="البريد الإلكتروني" v={d.email} onCopy={onCopy} copyLabel="البريد" />
-          <Row k="رقم الحساب" v={d.accountNumber} onCopy={onCopy} copyLabel="رقم الحساب" />
-          <Row k="كلمة مرور الواي فاي" v={d.wifiPassword} onCopy={onCopy} copyLabel="مرور الواي فاي" />
-          <Row k="كلمة مرور البريد" v={d.emailPassword} onCopy={onCopy} copyLabel="مرور البريد" />
-          {agent && <Row k="المندوب" v={`${agent.name} (${agent.percent || 0}%)`} />}
-          {d.country && <Row k="دولة الشحن" v={`${d.country}${countryCur ? " (" + countryCur + ")" : ""}`} />}
-          {(d.originType || d.originNote) && (
-            <Row
-              k="حالة الجهاز"
-              v={`${originLabel(d.originType)}${d.originNote ? (d.originType ? " — " : "") + d.originNote : ""}`}
-            />
-          )}
-          <Row k="تاريخ البداية" v={fmtDate(d.startDate)} />
-          <Row k="تاريخ الانتهاء" v={fmtDate(d.endDate)} />
-          <Row k="المدة" v={`${d.durationDays} يوم`} />
-          {d.totalCustomer > 0 && (
-            <Row k="المطلوب من الزبون" v={`${money(d.totalCustomer)} ${symbolOf(d.currency)}`} />
-          )}
-          <Row k="ما دفعه الزبون" v={`${money(d.amountPaid)} ${symbolOf(d.currency)}`} onCopy={onCopy} copyVal={money(d.amountPaid)} copyLabel="المبلغ" />
-          {d.debt > 0 && (
-            <Row
-              k="دين الزبون المتبقي"
-              v={`${money(d.debt)} ${symbolOf(d.debtCurrency || d.currency)}`}
-              danger
-              onCopy={onCopy}
-              copyVal={money(d.debt)}
-              copyLabel="الدين المتبقي"
-            />
-          )}
-          {d.credit > 0 && (
-            <Row k="رصيد الزبون (وديعة)" v={`${money(d.credit)} ${symbolOf(d.creditCurrency || d.currency)}`} onCopy={onCopy} copyVal={money(d.credit)} copyLabel="الرصيد" />
-          )}
-          {d.cost > 0 && <Row k="تكلفتك (بالدولار)" v={`${money(d.cost)} $`} />}
-          {d.cost > 0 && (
-            <Row
-              k="الدفع للمورّد"
-              v={
-                d.broken
-                  ? "ملغى (تعطّل) — مكسب لنا"
-                  : d.costPaid
-                  ? "مدفوع ✅"
-                  : `غير مدفوع — ${money(d.cost)} $ (موعد ${fmtDate(d.supplierDueDate || d.endDate)})`
-              }
-              danger={!d.costPaid && !d.broken}
-            />
-          )}
-          {asNotes(d.notes).length > 0 && (
-            <div className="sn-notes-view">
-              <span className="sn-row-k">ملاحظات</span>
-              <ul>
-                {asNotes(d.notes).map((n, i) => (
-                  <li key={i}>{n}</li>
-                ))}
-              </ul>
-            </div>
-          )}
-          {(d.photos || []).length > 0 && (
-            <div className="sn-notes-view">
-              <span className="sn-row-k">صور</span>
-              <div className="sn-photos">
-                {d.photos.map((src, i) => (
-                  <a className="sn-photo" key={i} href={src} target="_blank" rel="noreferrer">
-                    <img src={src} alt={"صورة " + (i + 1)} />
-                  </a>
-                ))}
-              </div>
-            </div>
-          )}
-          {d.audio && (
-            <div className="sn-notes-view">
-              <span className="sn-row-k">مقطع صوتي</span>
-              <audio controls src={d.audio} style={{ width: "100%", height: 36 }} />
+          <div className="sn-grid2v">
+            <CField k="تاريخ البداية" v={fmtDate(d.startDate)} />
+            <CField k="تاريخ الانتهاء" v={fmtDate(d.endDate)} />
+            <CField k="المدة" v={`${d.durationDays} يوم`} />
+            {d.country && <CField k="دولة الشحن" v={`${d.country}${countryCur ? " (" + countryCur + ")" : ""}`} />}
+            {d.totalCustomer > 0 && <CField k="المطلوب من الزبون" v={`${money(d.totalCustomer)} ${symbolOf(d.currency)}`} />}
+            <CField k="ما دفعه الزبون" v={`${money(d.amountPaid)} ${symbolOf(d.currency)}`} copy={money(d.amountPaid)} onCopy={onCopy} color={pc} />
+            {d.debt > 0 && <CField k="الدين المتبقي" v={`${money(d.debt)} ${symbolOf(d.debtCurrency || d.currency)}`} danger copy={money(d.debt)} onCopy={onCopy} />}
+            {d.credit > 0 && <CField k="رصيد (وديعة)" v={`${money(d.credit)} ${symbolOf(d.creditCurrency || d.currency)}`} copy={money(d.credit)} onCopy={onCopy} />}
+            {d.cost > 0 && <CField k="التكلفة بالدولار" v={`${money(d.cost)} $`} />}
+            {d.cost > 0 && <CField k="الدفع للمورّد" v={d.broken ? "ملغى (تعطّل)" : d.costPaid ? "مدفوع ✅" : "غير مدفوع"} danger={!d.costPaid && !d.broken} />}
+            {agent && <CField k="المندوب" v={`${agent.name} (${agent.percent || 0}%)`} />}
+          </div>
+
+          <button className="sn-collapse-h" onClick={() => setShowSecret(!showSecret)}>
+            <span>🔐 بيانات الحساب وكلمات المرور</span>
+            <span>{showSecret ? "▾" : "◂"}</span>
+          </button>
+          {showSecret && (
+            <div className="sn-grid2v">
+              <CField k="رقم الحساب" v={d.accountNumber} copy={d.accountNumber} onCopy={onCopy} />
+              <CField k="البريد الإلكتروني" v={d.email} copy={d.email} onCopy={onCopy} />
+              <CField k="مرور الواي فاي" v={d.wifiPassword} copy={d.wifiPassword} onCopy={onCopy} secret />
+              <CField k="مرور البريد" v={d.emailPassword} copy={d.emailPassword} onCopy={onCopy} secret />
             </div>
           )}
 
-          <div className="sn-card-actions">
+          {(asNotes(d.notes).length > 0 || d.originType || d.originNote || (d.photos || []).length > 0 || d.audio) && (
+            <button className="sn-collapse-h" onClick={() => setShowMore(!showMore)}>
+              <span>📝 ملاحظات وحالة الجهاز</span>
+              <span>{showMore ? "▾" : "◂"}</span>
+            </button>
+          )}
+          {showMore && (
+            <div className="sn-more-box">
+              {(d.originType || d.originNote) && (
+                <p className="sn-more-line">{originLabel(d.originType)}{d.originNote ? (d.originType ? " — " : "") + d.originNote : ""}</p>
+              )}
+              {asNotes(d.notes).length > 0 && (
+                <ul className="sn-more-notes">{asNotes(d.notes).map((n, i) => <li key={i}>{n}</li>)}</ul>
+              )}
+              {(d.photos || []).length > 0 && (
+                <div className="sn-photos">
+                  {d.photos.map((src, i) => (
+                    <a className="sn-photo" key={i} href={src} target="_blank" rel="noreferrer"><img src={src} alt={"صورة " + (i + 1)} /></a>
+                  ))}
+                </div>
+              )}
+              {d.audio && <audio controls src={d.audio} style={{ width: "100%", height: 36, marginTop: 8 }} />}
+            </div>
+          )}
+
+          <div className="sn-card-actions sn-card-actions--bar">
             <HoldButton icon="📋" label="نسخ" variant="blue" onAct={copyAll} />
             <HoldButton icon="🔄" label="تجديد" variant="green" hold onAct={() => onRenew(d)} />
             <HoldButton icon="💬" label="تأكيد" onAct={() => onWhats(d, "charged")} />
-            <HoldButton icon="⏰" label="تذكير" onAct={() => onWhats(d, "reminder")} />
             <HoldButton icon="✏️" label="تعديل" hold onAct={() => onEdit(d)} />
             {onExport && <HoldButton icon="📄" label="PDF" variant="blue" onAct={() => onExport(d)} />}
-            {!compact && d.debt > 0 && (
-              <HoldButton icon="💵" label="تسديد" variant="gold" hold onAct={() => onClearDebt(d)} />
-            )}
+            {!compact && d.debt > 0 && <HoldButton icon="💵" label="تسديد" variant="gold" hold onAct={() => onClearDebt(d)} />}
             {!compact && d.cost > 0 && !d.broken && (
-              <HoldButton
-                icon="🏷️"
-                label={d.costPaid ? "إلغاء دفع" : "دفعت للمورّد"}
-                variant={d.costPaid ? "def" : "green"}
-                hold
-                onAct={() => onMarkPaid(d, !d.costPaid)}
-              />
+              <HoldButton icon="🏷️" label={d.costPaid ? "إلغاء دفع" : "دفعت"} variant={d.costPaid ? "def" : "green"} hold onAct={() => onMarkPaid(d, !d.costPaid)} />
             )}
             {!compact && (d.broken ? (
               <HoldButton icon="↩️" label="تشغيل" hold onAct={() => onUnbreak(d)} />
             ) : (
               <HoldButton icon="🔧" label="تعطّل" variant="gold" hold onAct={() => onBroken(d)} />
             ))}
-            {!compact && (
-              <HoldButton icon="🗑️" label="حذف" variant="red" hold onAct={() => onDelete(d)} />
-            )}
+            {!compact && <HoldButton icon="🗑️" label="حذف" variant="red" hold onAct={() => onDelete(d)} />}
           </div>
         </div>
       )}
     </div>
   );
 }
+
 
 function Row({ k, v, danger, onCopy, copyVal, copyLabel }) {
   const value = v || "—";
@@ -2122,6 +2589,38 @@ function Reports({ data, toBase, settings }) {
     return { dayP, monthP, allP, monthRevenue, debt, supplierUnpaid, byCur, agentsShare, myNet };
   }, [data, toBase, t]);
 
+  // أفضل الزبائن + إحصاء الدول + مقارنة الشهر بالماضي
+  const extra = useMemo(() => {
+    const lastMonth = (() => { const d = new Date(); d.setMonth(d.getMonth() - 1); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`; })();
+    let monthSales = 0, lastSales = 0, monthProfit = 0, lastProfit = 0;
+    data.transactions.forEach((tr) => {
+      const mm = (tr.date || "").slice(0, 7);
+      const p = txProfit(tr, toBase);
+      if (mm === month) { monthProfit += p; if (!tr.isExpense) monthSales += toBase(tr.amount, tr.currency); }
+      if (mm === lastMonth) { lastProfit += p; if (!tr.isExpense) lastSales += toBase(tr.amount, tr.currency); }
+    });
+    // أفضل الزبائن حسب الربح (بحسب الاسم)
+    const byCust = {};
+    data.transactions.forEach((tr) => {
+      const nm = (tr.customerName || "").trim();
+      if (!nm) return;
+      byCust[nm] = (byCust[nm] || 0) + txProfit(tr, toBase);
+    });
+    const topCustomers = Object.entries(byCust).map(([n, v]) => ({ n, v: Math.round(v * 100) / 100 })).sort((a, b) => b.v - a.v).slice(0, 8);
+    // إحصاء الدول
+    const byCountry = {};
+    data.devices.forEach((d) => {
+      const c = d.country || "مباشر بالدولار";
+      const e = byCountry[c] || { count: 0, cost: 0 };
+      e.count++;
+      if (d.cost) e.cost += Number(d.cost) || 0;
+      byCountry[c] = e;
+    });
+    const countries = Object.entries(byCountry).map(([n, e]) => ({ n, count: e.count, cost: Math.round(e.cost) })).sort((a, b) => b.count - a.count);
+    const pct = (cur, prev) => prev > 0 ? Math.round((cur - prev) / prev * 100) : (cur > 0 ? 100 : 0);
+    return { monthSales, lastSales, monthProfit, lastProfit, topCustomers, countries, salesPct: pct(monthSales, lastSales), profitPct: pct(monthProfit, lastProfit) };
+  }, [data, toBase, month]);
+
   // الإيميلات وعددها
   const emails = useMemo(() => {
     const map = {};
@@ -2167,6 +2666,48 @@ function Reports({ data, toBase, settings }) {
   return (
     <div className="sn-page">
       <ProfitStatement data={data} toBase={toBase} />
+
+      <section className="sn-block">
+        <h2>📈 مقارنة الشهر بالماضي</h2>
+        <div className="sn-cmp-grid">
+          <div className="sn-cmp">
+            <span>المبيعات</span>
+            <strong>{money(extra.monthSales)} عملة</strong>
+            <em className={extra.salesPct >= 0 ? "sn-pos" : "sn-neg"}>{extra.salesPct >= 0 ? "▲ +" : "▼ "}{extra.salesPct}%</em>
+          </div>
+          <div className="sn-cmp">
+            <span>الأرباح</span>
+            <strong className={extra.monthProfit < 0 ? "sn-neg" : ""}>{money(extra.monthProfit)} عملة</strong>
+            <em className={extra.profitPct >= 0 ? "sn-pos" : "sn-neg"}>{extra.profitPct >= 0 ? "▲ +" : "▼ "}{extra.profitPct}%</em>
+          </div>
+        </div>
+        <p className="sn-hint">مقارنةً بالشهر الماضي (مبيعاته {money(extra.lastSales)} • أرباحه {money(extra.lastProfit)} عملة).</p>
+      </section>
+
+      {extra.topCustomers.length > 0 && (
+        <section className="sn-block">
+          <h2>📊 أفضل الزبائن (بالربح)</h2>
+          {extra.topCustomers.map((c, i) => (
+            <div className="sn-rank-row" key={c.n}>
+              <span className="sn-rank-no">{i + 1}</span>
+              <span className="sn-rank-name">{c.n}</span>
+              <span className={"sn-rank-val " + (c.v < 0 ? "sn-neg" : "sn-pos")}>{c.v >= 0 ? "+" : ""}{money(c.v)} عملة</span>
+            </div>
+          ))}
+        </section>
+      )}
+
+      {extra.countries.length > 0 && (
+        <section className="sn-block">
+          <h2>🌍 إحصاء حسب الدولة</h2>
+          {extra.countries.map((c) => (
+            <div className="sn-rank-row" key={c.n}>
+              <span className="sn-rank-name">{c.n}</span>
+              <span className="sn-rank-val">{c.count} جهاز{c.cost ? ` • تكلفة ${c.cost}$` : ""}</span>
+            </div>
+          ))}
+        </section>
+      )}
 
       <section className="sn-profit-grid">
         <div className="sn-profit sn-profit--day">
@@ -2349,6 +2890,7 @@ function DeviceForm({ initial, settings, devices = [], contacts = [], agents = [
           supplierDueDate: initial.supplierDueDate || addDays(initial.startDate, settings.supplierDays),
           originType: initial.originType || "",
           originNote: initial.originNote || "",
+          tag: initial.tag || "",
           photos: initial.photos || [],
           audio: initial.audio || "",
           notes: asNotes(initial.notes),
@@ -2378,6 +2920,7 @@ function DeviceForm({ initial, settings, devices = [], contacts = [], agents = [
           photos: [],           // صور الملاحظة
           audio: "",            // مقطع صوتي
           agentId: "",          // المندوب
+          tag: "",              // وسم الزبون (VIP/جملة/تجزئة)
           notes: [],
         }
   );
@@ -2787,6 +3330,15 @@ function DeviceForm({ initial, settings, devices = [], contacts = [], agents = [
         </select>
       </Field>
 
+      <Field label="🏷️ وسم الزبون">
+        <select value={f.tag || ""} onChange={(e) => set("tag", e.target.value)}>
+          <option value="">— بدون وسم —</option>
+          {["VIP", "جملة", "تجزئة", "جديد", "دائم"].map((t) => (
+            <option key={t} value={t}>{t}</option>
+          ))}
+        </select>
+      </Field>
+
       <div className="sn-media-bar">
         <button type="button" className="sn-icon-btn" onClick={addNote} title="إضافة ملاحظة">📝</button>
         <button type="button" className="sn-icon-btn" disabled={(f.photos || []).length >= 4} onClick={() => photoInput.current?.click()} title="إضافة صورة">📷</button>
@@ -3109,8 +3661,9 @@ function agentProfit(agentId, data, toBase) {
   return Math.round(profit * 100) / 100;
 }
 
-function Agents({ data, toBase, onAddAgent, onEditAgent, onDeleteAgent, onViewAgent }) {
+function Agents({ data, toBase, onAddAgent, onEditAgent, onDeleteAgent, onViewAgent, onSettle }) {
   const agents = data.agents || [];
+  const payouts = data.agentPayouts || [];
   return (
     <div className="sn-page">
       <button className="sn-btn sn-btn--primary sn-full" onClick={onAddAgent}>
@@ -3126,6 +3679,8 @@ function Agents({ data, toBase, onAddAgent, onEditAgent, onDeleteAgent, onViewAg
         agents.map((a) => {
           const profit = agentProfit(a.id, data, toBase);
           const share = (profit * (Number(a.percent) || 0)) / 100;
+          const paid = payouts.filter((p) => p.agentId === a.id).reduce((s, p) => s + (Number(p.amount) || 0), 0);
+          const remain = Math.round((share - paid) * 100) / 100;
           const count = data.devices.filter((d) => d.agentId === a.id).length;
           return (
             <div className="sn-agent-card" key={a.id}>
@@ -3144,9 +3699,21 @@ function Agents({ data, toBase, onAddAgent, onEditAgent, onDeleteAgent, onViewAg
               </div>
               <div className="sn-agent-figs">
                 <span className={profit < 0 ? "sn-neg" : ""}>ربح أجهزته: {money(profit)} عملة</span>
-                <span className={profit - share < 0 ? "sn-neg" : ""}>يتبقّى لنا: {money(profit - share)} عملة</span>
+                <span>سُلّم له: {money(paid)} عملة</span>
+                <span className={remain > 0 ? "sn-neg" : "sn-pos"}>{remain > 0 ? `تدين له بـ ${money(remain)}` : remain < 0 ? `زائد ${money(-remain)}` : "مُسوّى ✓"} عملة</span>
               </div>
               <div className="sn-card-actions">
+                {onSettle && remain > 0 && (
+                  <button
+                    className="sn-mini sn-mini--green"
+                    onClick={() => {
+                      const v = window.prompt(`كم سلّمت للمندوب ${a.name}؟ (المتبقّي ${money(remain)})`, String(Math.round(remain)));
+                      if (v != null && Number(v) > 0) onSettle(a, Number(v));
+                    }}
+                  >
+                    💵 سلّمت نصيبه
+                  </button>
+                )}
                 <button className="sn-mini sn-mini--blue" onClick={() => onViewAgent(a)}>
                   📋 أجهزته
                 </button>
@@ -3378,6 +3945,9 @@ function AgentDevices({ agent, data, toBase, onClose, onEdit, onRenew, onCopy, o
             countries={data.countries || []}
             balance={customerBalance(d, data, data.settings.rates)}
             compact
+            personColor={colorOf(d, data.personColors)}
+            toBase={toBase}
+            txs={data.transactions || []}
             onEdit={onEdit}
             onRenew={onRenew}
             onCopy={onCopy}
@@ -3392,7 +3962,312 @@ function AgentDevices({ agent, data, toBase, onClose, onEdit, onRenew, onCopy, o
 /* ============================================================
    أدوات (تُفتح من القائمة الجانبية)
    ============================================================ */
-function ToolsPanel({ kind, data, onClose, onAddCountry, onEditCountry, onDeleteCountry, onAddContact, onEditContact, onDeleteContact, onImportExcel, onImport, onRestoreTrash, onPurgeTrash, onEmptyTrash }) {
+function CalendarPanel({ data }) {
+  const now = new Date();
+  const [base, setBase] = useState({ y: now.getFullYear(), m: now.getMonth() });
+  const [selDay, setSelDay] = useState(null);
+  const first = new Date(base.y, base.m, 1);
+  const daysInMonth = new Date(base.y, base.m + 1, 0).getDate();
+  const startWeekday = first.getDay();
+  const monthStr = `${base.y}-${String(base.m + 1).padStart(2, "0")}`;
+  const byDay = {};
+  (data.devices || []).forEach((d) => {
+    if (d.broken) return;
+    const e = d.endDate || "";
+    if (e.slice(0, 7) === monthStr) {
+      const day = Number(e.slice(8, 10));
+      (byDay[day] = byDay[day] || []).push(d);
+    }
+  });
+  const monthName = first.toLocaleDateString("ar", { month: "long", year: "numeric" });
+  const move = (n) => { setSelDay(null); setBase((b) => { const d = new Date(b.y, b.m + n, 1); return { y: d.getFullYear(), m: d.getMonth() }; }); };
+  const wd = ["أحد", "إثنين", "ثلاثاء", "أربعاء", "خميس", "جمعة", "سبت"];
+  const todayN = (now.getFullYear() === base.y && now.getMonth() === base.m) ? now.getDate() : -1;
+  return (
+    <>
+      <div className="sn-cal-nav">
+        <button onClick={() => move(-1)}>‹</button>
+        <span>{monthName}</span>
+        <button onClick={() => move(1)}>›</button>
+      </div>
+      <div className="sn-cal-grid sn-cal-head">{wd.map((w) => <span key={w} className="sn-cal-wd">{w}</span>)}</div>
+      <div className="sn-cal-grid">
+        {Array.from({ length: startWeekday }).map((_, i) => <span key={"b" + i} />)}
+        {Array.from({ length: daysInMonth }).map((_, i) => {
+          const day = i + 1;
+          const list = byDay[day] || [];
+          return (
+            <button
+              key={day}
+              className={"sn-cal-day" + (day === todayN ? " is-today" : "") + (selDay === day ? " is-sel" : "") + (list.length ? " has" : "")}
+              onClick={() => setSelDay(selDay === day ? null : day)}
+            >
+              <span>{day}</span>
+              {list.length > 0 && <span className="sn-cal-badge">{list.length}</span>}
+            </button>
+          );
+        })}
+      </div>
+      {selDay && (
+        <div className="sn-cal-list">
+          <div className="sn-cal-list-h">تجديدات يوم {selDay}/{base.m + 1}</div>
+          {(byDay[selDay] || []).length === 0 ? (
+            <p className="sn-muted-txt">لا تجديدات هذا اليوم.</p>
+          ) : (
+            (byDay[selDay] || []).map((d) => (
+              <div className="sn-cal-item" key={d.id}>
+                <span>{d.customerName || "—"}</span>
+                <span className="sn-cal-item-sub">{d.phone || d.email || "—"}</span>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+      <p className="sn-hint">الأرقام الحمراء = عدد الاشتراكات المنتهية في ذلك اليوم. اضغط يوماً لرؤية الأسماء.</p>
+    </>
+  );
+}
+
+function InventoryPanel({ data, onAdd, onAdjust, onDelete, onSell }) {
+  const [cat, setCat] = useState("device");
+  const [name, setName] = useState("");
+  const [qty, setQty] = useState("1");
+  const [cost, setCost] = useState("");
+  const [costCurrency, setCostCurrency] = useState("USDT");
+  const [price, setPrice] = useState("");
+  const [currency, setCurrency] = useState("MRU");
+  const items = (data.inventory || []).filter((it) => it.category === cat);
+  const totalQty = items.reduce((s, it) => s + (Number(it.qty) || 0), 0);
+  const add = () => {
+    if (!name.trim()) return;
+    onAdd({ name: name.trim(), category: cat, qty, cost, costCurrency, price, currency });
+    setName(""); setQty("1"); setCost(""); setPrice("");
+  };
+  return (
+    <>
+      <div className="sn-inv-tabs">
+        <button className={cat === "device" ? "is-on" : ""} onClick={() => setCat("device")}>📡 أجهزة</button>
+        <button className={cat === "accessory" ? "is-on" : ""} onClick={() => setCat("accessory")}>🔌 اكسسوارات</button>
+      </div>
+      <Field label={cat === "device" ? "اسم الجهاز" : "اسم الاكسسوار"}>
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder={cat === "device" ? "مثال: Starlink Mini" : "مثال: كابل / راوتر / حامل"} />
+      </Field>
+      <div className="sn-grid2">
+        <Field label="الكمية"><input type="number" inputMode="numeric" value={qty} onChange={(e) => setQty(e.target.value)} /></Field>
+        <Field label="سعر البيع">
+          <input type="number" inputMode="decimal" value={price} onChange={(e) => setPrice(e.target.value)} />
+        </Field>
+      </div>
+      <div className="sn-grid2">
+        <Field label="عملة البيع">
+          <select value={currency} onChange={(e) => setCurrency(e.target.value)}>{CURRENCIES.map((c) => <option key={c.code} value={c.code}>{c.label}</option>)}</select>
+        </Field>
+        <Field label="تكلفة الشراء (للوحدة)"><input type="number" inputMode="decimal" value={cost} onChange={(e) => setCost(e.target.value)} /></Field>
+      </div>
+      <Field label="عملة التكلفة">
+        <select value={costCurrency} onChange={(e) => setCostCurrency(e.target.value)}>{CURRENCIES.map((c) => <option key={c.code} value={c.code}>{c.label}</option>)}</select>
+      </Field>
+      <button className="sn-btn sn-btn--primary sn-full" disabled={!name.trim()} onClick={add}>➕ إضافة للمخزون</button>
+
+      <p className="sn-hint">إجمالي الكمية في {cat === "device" ? "الأجهزة" : "الاكسسوارات"}: <strong>{totalQty}</strong> قطعة. زر «بيع» يخصم قطعة ويسجّل الربح تلقائياً.</p>
+
+      {items.length === 0 ? (
+        <p className="sn-muted-txt">لا أصناف بعد في هذه الفئة.</p>
+      ) : (
+        items.map((it) => (
+          <div className="sn-inv-row" key={it.id}>
+            <div className="sn-inv-info">
+              <span className="sn-inv-name">{it.name} <span className={"sn-inv-qty" + (it.qty <= 0 ? " out" : "")}>{it.qty} قطعة</span></span>
+              <span className="sn-inv-sub">بيع {money(it.price)} {symbolOf(it.currency)}{it.cost ? ` • تكلفة ${money(it.cost)} ${symbolOf(it.costCurrency)}` : ""}</span>
+            </div>
+            <div className="sn-inv-acts">
+              <button className="sn-mini sn-mini--green" disabled={it.qty <= 0} onClick={() => { const c = window.prompt("اسم المشتري (اختياري):", "") || ""; onSell(it, c); }}>🛒 بيع</button>
+              <button className="sn-mini" onClick={() => onAdjust(it.id, 1)} title="زيادة">➕</button>
+              <button className="sn-mini" onClick={() => onAdjust(it.id, -1)} title="إنقاص">➖</button>
+              <button className="sn-mini sn-mini--red" onClick={() => onDelete(it.id)}>🗑️</button>
+            </div>
+          </div>
+        ))
+      )}
+    </>
+  );
+}
+
+function ServicesPanel({ data, toBase, onAdd, onDelete }) {
+  const SERVICES = ["تفعيل جهاز", "تعديل جهاز", "توثيق جهاز", "استرداد جهاز", "تغيير البريد", "إعادة ضبط", "أخرى"];
+  const [service, setService] = useState(SERVICES[0]);
+  const [custom, setCustom] = useState("");
+  const [customerName, setCustomerName] = useState("");
+  const [amount, setAmount] = useState("");
+  const [currency, setCurrency] = useState("MRU");
+  const [cost, setCost] = useState("");
+  const [costCurrency, setCostCurrency] = useState("MRU");
+  const [note, setNote] = useState("");
+  const [date, setDate] = useState(todayStr());
+  const incomes = (data.transactions || []).filter((t) => t.type === "خدمة");
+  const costFor = (svcId) => (data.transactions || []).find((t) => t.type === "تكلفة خدمة" && t.svcId === svcId);
+  const month = todayStr().slice(0, 7);
+  let totalProfit = 0, monthProfit = 0;
+  incomes.forEach((t) => {
+    const c = costFor(t.svcId);
+    const p = toBase(t.amount, t.currency) - (c ? toBase(c.amount, c.currency) : 0);
+    totalProfit += p;
+    if ((t.date || "").slice(0, 7) === month) monthProfit += p;
+  });
+  const add = () => {
+    if (!(Number(amount) > 0)) return;
+    const svc = service === "أخرى" ? (custom.trim() || "خدمة") : service;
+    onAdd({ service: svc, customerName, amount, currency, cost, costCurrency, note, date });
+    setAmount(""); setCost(""); setNote(""); setCustom(""); setCustomerName("");
+  };
+  return (
+    <>
+      <p className="sn-hint" style={{ marginTop: 0 }}>سجّل أي خدمة تقدّمها (تفعيل، توثيق، استرداد…) بسعرها وتكلفتها، فتُحسب أرباحها مع أرباحك.</p>
+      <Field label="نوع الخدمة">
+        <select value={service} onChange={(e) => setService(e.target.value)}>
+          {SERVICES.map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
+      </Field>
+      {service === "أخرى" && (
+        <Field label="اسم الخدمة"><input value={custom} onChange={(e) => setCustom(e.target.value)} placeholder="اكتب اسم الخدمة" /></Field>
+      )}
+      <Field label="اسم الزبون (اختياري)"><input value={customerName} onChange={(e) => setCustomerName(e.target.value)} /></Field>
+      <div className="sn-grid2">
+        <Field label="السعر (ما تتقاضاه)"><input type="number" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} /></Field>
+        <Field label="عملة السعر">
+          <select value={currency} onChange={(e) => setCurrency(e.target.value)}>
+            {CURRENCIES.map((c) => <option key={c.code} value={c.code}>{c.label}</option>)}
+          </select>
+        </Field>
+      </div>
+      <div className="sn-grid2">
+        <Field label="تكلفتك (اختياري)"><input type="number" inputMode="decimal" value={cost} onChange={(e) => setCost(e.target.value)} /></Field>
+        <Field label="عملة التكلفة">
+          <select value={costCurrency} onChange={(e) => setCostCurrency(e.target.value)}>
+            {CURRENCIES.map((c) => <option key={c.code} value={c.code}>{c.label}</option>)}
+          </select>
+        </Field>
+      </div>
+      <Field label="ملاحظة (اختياري)"><input value={note} onChange={(e) => setNote(e.target.value)} /></Field>
+      <Field label="التاريخ"><input type="date" lang="en-GB" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+      <button className="sn-btn sn-btn--primary sn-full" disabled={!(Number(amount) > 0)} onClick={add}>➕ تسجيل الخدمة</button>
+
+      <div className="sn-calc-out" style={{ marginTop: 12 }}>
+        <div className="sn-calc-row"><span>أرباح خدمات هذا الشهر</span><strong className={monthProfit < 0 ? "sn-neg" : "sn-pos"}>{money(monthProfit)} عملة</strong></div>
+        <div className="sn-calc-row sn-calc-total"><span>إجمالي أرباح الخدمات</span><strong className={totalProfit < 0 ? "sn-neg" : "sn-pos"}>{money(totalProfit)} عملة</strong></div>
+      </div>
+
+      {incomes.length > 0 && (
+        <div style={{ marginTop: 10 }}>
+          <div className="sn-cal-list-h">سجل الخدمات ({incomes.length})</div>
+          {incomes.map((t) => {
+            const c = costFor(t.svcId);
+            const prof = toBase(t.amount, t.currency) - (c ? toBase(c.amount, c.currency) : 0);
+            return (
+              <div className="sn-trash-row" key={t.svcId || t.id}>
+                <div>
+                  <span className="sn-trash-name">{t.service}{t.customerName ? ` — ${t.customerName}` : ""}</span>
+                  <span className="sn-trash-sub">{money(t.amount)} {symbolOf(t.currency)}{c ? ` − تكلفة ${money(c.amount)} ${symbolOf(c.currency)}` : ""} • ربح {money(prof)} • {fmtDate(t.date)}</span>
+                </div>
+                <button className="sn-mini sn-mini--red" onClick={() => onDelete(t.svcId)}>🗑️</button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </>
+  );
+}
+
+function ExpensesPanel({ data, toBase, onAdd, onDelete }) {
+  const [amount, setAmount] = useState("");
+  const [currency, setCurrency] = useState("MRU");
+  const [note, setNote] = useState("");
+  const [date, setDate] = useState(todayStr());
+  const list = (data.transactions || []).filter((t) => t.type === "مصروف عام");
+  const totalBase = list.reduce((s, t) => s + toBase(t.amount, t.currency), 0);
+  const month = todayStr().slice(0, 7);
+  const monthBase = list.filter((t) => (t.date || "").slice(0, 7) === month).reduce((s, t) => s + toBase(t.amount, t.currency), 0);
+  const add = () => {
+    if (!(Number(amount) > 0)) return;
+    onAdd({ amount, currency, note, date });
+    setAmount(""); setNote("");
+  };
+  return (
+    <>
+      <p className="sn-hint" style={{ marginTop: 0 }}>مصاريفك خارج المورّد (إنترنت، نقل، هاتف…). تُخصم من صافي ربحك في الرئيسية والتقارير.</p>
+      <div className="sn-grid2">
+        <Field label="المبلغ"><input type="number" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} /></Field>
+        <Field label="العملة">
+          <select value={currency} onChange={(e) => setCurrency(e.target.value)}>
+            {CURRENCIES.map((c) => <option key={c.code} value={c.code}>{c.label}</option>)}
+          </select>
+        </Field>
+      </div>
+      <Field label="الوصف (اختياري)"><input value={note} onChange={(e) => setNote(e.target.value)} placeholder="مثال: اشتراك إنترنت" /></Field>
+      <Field label="التاريخ"><input type="date" lang="en-GB" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+      <button className="sn-btn sn-btn--primary sn-full" disabled={!(Number(amount) > 0)} onClick={add}>➕ إضافة مصروف</button>
+      <div className="sn-calc-out" style={{ marginTop: 12 }}>
+        <div className="sn-calc-row"><span>مصروفات هذا الشهر</span><strong className="sn-neg">{money(monthBase)} عملة</strong></div>
+        <div className="sn-calc-row"><span>إجمالي كل المصروفات</span><strong className="sn-neg">{money(totalBase)} عملة</strong></div>
+      </div>
+      {list.length > 0 && (
+        <div style={{ marginTop: 10 }}>
+          {list.map((t) => (
+            <div className="sn-trash-row" key={t.id}>
+              <div>
+                <span className="sn-trash-name">{money(t.amount)} {symbolOf(t.currency)}</span>
+                <span className="sn-trash-sub">{t.note || "مصروف"} • {fmtDate(t.date)}</span>
+              </div>
+              <button className="sn-mini sn-mini--red" onClick={() => onDelete(t.id)}>🗑️</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function PriceCalc({ rates }) {
+  const [cost, setCost] = useState("");
+  const [margin, setMargin] = useState("30");
+  const [cur, setCur] = useState("MRU");
+  const usd = Number(rates.USDT) || 430;
+  const cRate = Number(rates[cur]) || 1;
+  const costCustomer = (Number(cost) || 0) * usd / cRate;
+  const m = Number(margin) || 0;
+  const price = costCustomer * (1 + m / 100);
+  const profit = price - costCustomer;
+  return (
+    <>
+      <Field label="التكلفة (بالدولار $)">
+        <input type="number" inputMode="decimal" value={cost} onChange={(e) => setCost(e.target.value)} placeholder="مثال: 56" />
+      </Field>
+      <div className="sn-grid2">
+        <Field label="هامش الربح %">
+          <input type="number" inputMode="decimal" value={margin} onChange={(e) => setMargin(e.target.value)} />
+        </Field>
+        <Field label="عملة الزبون">
+          <select value={cur} onChange={(e) => setCur(e.target.value)}>
+            {CURRENCIES.filter((c) => c.code !== "USDT").map((c) => (
+              <option key={c.code} value={c.code}>{c.label}</option>
+            ))}
+          </select>
+        </Field>
+      </div>
+      {Number(cost) > 0 && (
+        <div className="sn-calc-out">
+          <div className="sn-calc-row"><span>التكلفة بعملة الزبون</span><strong>{money(costCustomer)} {symbolOf(cur)}</strong></div>
+          <div className="sn-calc-row"><span>الربح ({m}%)</span><strong className="sn-pos">+{money(profit)} {symbolOf(cur)}</strong></div>
+          <div className="sn-calc-row sn-calc-total"><span>💹 السعر المقترح للزبون</span><strong>{money(price)} {symbolOf(cur)}</strong></div>
+        </div>
+      )}
+      <p className="sn-hint">يُحسب بسعر الصرف المحفوظ (1$ = {usd} MRU). عدّل الأسعار من الإعدادات ← أسعار العملة الأساس.</p>
+    </>
+  );
+}
+
+function ToolsPanel({ kind, data, toBase, onClose, onAddCountry, onEditCountry, onDeleteCountry, onAddContact, onEditContact, onDeleteContact, onImportExcel, onImport, onRestoreTrash, onPurgeTrash, onEmptyTrash, onRestoreAuto, onAddExpense, onDeleteExpense, onAddService, onDeleteService, onAddInv, onAdjustInv, onDeleteInv, onSellInv }) {
   const fileRef = useRef(null);
   const excelRef = useRef(null);
   const EXCEL_HEADERS = [
@@ -3518,12 +4393,22 @@ function ToolsPanel({ kind, data, onClose, onAddCountry, onEditCountry, onDelete
     countries: "💱 سجل عملات الدول",
     contacts: "📒 دفتر العملاء",
     excel: "📊 استيراد / تصدير Excel",
+    calc: "💹 حاسبة سعر البيع",
+    calendar: "🗓️ تقويم التجديدات",
+    services: "🛠️ الخدمات",
+    inventory: "📦 المخزون",
+    expenses: "💸 المصروفات العامة",
     backup: "☁️ النسخ الاحتياطي ودرايف",
     trash: "🗑️ سلة المحذوفات",
   };
 
   return (
     <Sheet title={titles[kind] || "أدوات"} onClose={onClose}>
+      {kind === "calc" && <PriceCalc rates={data.settings.rates} />}
+      {kind === "services" && <ServicesPanel data={data} toBase={toBase} onAdd={onAddService} onDelete={onDeleteService} />}
+      {kind === "inventory" && <InventoryPanel data={data} onAdd={onAddInv} onAdjust={onAdjustInv} onDelete={onDeleteInv} onSell={onSellInv} />}
+      {kind === "calendar" && <CalendarPanel data={data} />}
+      {kind === "expenses" && <ExpensesPanel data={data} toBase={toBase} onAdd={onAddExpense} onDelete={onDeleteExpense} />}
       {kind === "countries" && (
         <>
           <p className="sn-hint" style={{ marginTop: 0 }}>الدول التي تشحن منها وسعر عملتها مقابل الدولار. تُستخدم لحساب تكلفة الشحن بالدولار تلقائياً.</p>
@@ -3586,6 +4471,11 @@ function ToolsPanel({ kind, data, onClose, onAddCountry, onEditCountry, onDelete
             <button className="sn-btn sn-btn--ghost" onClick={() => fileRef.current?.click()}>⬆️ استيراد ملف</button>
           </div>
           <button className="sn-btn sn-btn--primary sn-full" style={{ marginTop: 10 }} onClick={shareData}>📤 مشاركة النسخة (إلى درايف…)</button>
+          {onRestoreAuto && (
+            <button className="sn-btn sn-btn--ghost sn-full" style={{ marginTop: 10 }} onClick={onRestoreAuto}>
+              ☁️ استعادة آخر نسخة تلقائية
+            </button>
+          )}
           <button
             className="sn-btn sn-btn--ghost sn-full"
             style={{ marginTop: 10 }}
@@ -3650,6 +4540,9 @@ function Settings({ settings, onSave, onReset }) {
         <Field label="مهلة الدفع للمورّد (أيام من بداية الاشتراك)">
           <input type="number" value={s.supplierDays} onChange={(e) => set("supplierDays", Number(e.target.value) || 23)} />
         </Field>
+        <Field label="🎯 هدف ربح الشهر (بالأوقية — 0 = بلا هدف)">
+          <input type="number" value={s.monthlyGoal || 0} onChange={(e) => set("monthlyGoal", Number(e.target.value) || 0)} />
+        </Field>
         <label className="sn-switch-row">
           <span>🔊 أصوات التطبيق (دفع / شحن / حفظ)</span>
           <input
@@ -3658,6 +4551,35 @@ function Settings({ settings, onSave, onReset }) {
             onChange={(e) => { set("sounds", e.target.checked); setSoundOn(e.target.checked); if (e.target.checked) playSound("save"); }}
           />
         </label>
+        <label className="sn-switch-row">
+          <span>🔒 قفل التطبيق برمز سرّي</span>
+          <input
+            type="checkbox"
+            checked={!!s.pin}
+            onChange={(e) => {
+              if (e.target.checked) {
+                const p = (window.prompt("اختر رمزاً سرّياً (4 إلى 6 أرقام):") || "").replace(/\D/g, "").slice(0, 6);
+                if (p.length >= 4) set("pin", p);
+                else if (p) window.alert("الرمز يجب أن يكون 4 أرقام على الأقل.");
+              } else {
+                set("pin", "");
+              }
+            }}
+          />
+        </label>
+        {s.pin && (
+          <button
+            type="button"
+            className="sn-btn sn-btn--ghost sn-full"
+            onClick={() => {
+              const p = (window.prompt("الرمز الجديد (4 إلى 6 أرقام):") || "").replace(/\D/g, "").slice(0, 6);
+              if (p.length >= 4) set("pin", p);
+              else if (p) window.alert("الرمز يجب أن يكون 4 أرقام على الأقل.");
+            }}
+          >
+            🔑 تغيير الرمز السرّي
+          </button>
+        )}
       </section>
 
       <section className="sn-block">
@@ -3671,6 +4593,33 @@ function Settings({ settings, onSave, onReset }) {
           </Field>
         </div>
         <p className="sn-hint">تتحكّم بها في توحيد الأرباح والديون. الأوقية (MRU) = 1 (الأساس).</p>
+        <button
+          type="button"
+          className="sn-btn sn-btn--ghost sn-full"
+          onClick={async () => {
+            try {
+              const res = await fetch("https://open.er-api.com/v6/latest/USD");
+              const j = await res.json();
+              const r = j && j.rates ? j.rates : null;
+              if (!r || !r.MRU) { alert("تعذّر جلب الأسعار. تأكّد من الإنترنت."); return; }
+              const usdToMru = r.MRU;
+              const xof = r.XOF || r.XAF;
+              setS((p) => ({
+                ...p,
+                rates: {
+                  ...p.rates,
+                  USDT: Math.round(usdToMru * 100) / 100,
+                  FCFA: xof ? Math.round((usdToMru / xof) * 1000) / 1000 : p.rates.FCFA,
+                },
+              }));
+              alert(`تم التحديث:\n1$ = ${Math.round(usdToMru)} أوقية` + (xof ? `\n1 فرنك = ${(usdToMru / xof).toFixed(3)} أوقية` : "") + "\nلا تنسَ «حفظ الإعدادات».");
+            } catch (e) {
+              alert("تعذّر جلب الأسعار. تأكّد من الإنترنت.");
+            }
+          }}
+        >
+          💱 جلب أسعار الصرف تلقائياً من الإنترنت
+        </button>
       </section>
 
       <section className="sn-block">
@@ -4023,6 +4972,44 @@ const CSS = `
 
 /* البحث والتصنيفات */
 .sn-search{width:100%;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:12px 14px;color:var(--text);font-family:inherit;font-size:14px}
+.sn-search-row{display:flex;gap:8px;align-items:stretch}
+.sn-search-row .sn-search{flex:1}
+.sn-mic{flex-shrink:0;width:48px;border:1px solid var(--border);background:var(--surface2);border-radius:12px;font-size:20px;cursor:pointer;color:var(--accent)}
+.sn-mic:active{background:var(--accent);color:#fff}
+.sn-fin--good{background:rgba(61,220,151,.14);color:#5ee0a8;border:1px solid rgba(61,220,151,.4)}
+.sn-tag-badge{background:rgba(167,139,250,.16);color:#c4b5fd;border:1px solid rgba(167,139,250,.4)}
+.sn-cmp-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.sn-cmp{background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:12px;text-align:center}
+.sn-cmp span{display:block;font-size:12px;color:var(--muted)}
+.sn-cmp strong{display:block;font-size:17px;margin:5px 0}
+.sn-cmp em{font-size:12.5px;font-weight:800;font-style:normal}
+.sn-rank-row{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px dashed var(--border)}
+.sn-rank-row:last-child{border-bottom:none}
+.sn-rank-no{width:24px;height:24px;flex-shrink:0;background:var(--accent);color:#fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:800}
+.sn-rank-name{flex:1;font-weight:700;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sn-rank-val{font-weight:800;font-size:13px;flex-shrink:0}
+.sn-inv-tabs{display:flex;gap:8px;margin-bottom:12px}
+.sn-inv-tabs button{flex:1;padding:10px;border-radius:11px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-family:inherit;font-weight:800;font-size:13px;cursor:pointer}
+.sn-inv-tabs button.is-on{background:var(--accent);border-color:transparent;color:#fff}
+.sn-inv-row{display:flex;align-items:center;justify-content:space-between;gap:8px;background:var(--surface2);border:1px solid var(--border);border-radius:11px;padding:9px 11px;margin-bottom:7px}
+.sn-inv-info{min-width:0;flex:1}
+.sn-inv-name{display:block;font-weight:700;font-size:13.5px}
+.sn-inv-qty{display:inline-block;background:var(--surface);border:1px solid var(--border);border-radius:7px;padding:1px 7px;font-size:11px;margin-inline-start:5px;color:var(--ok)}
+.sn-inv-qty.out{color:var(--bad);border-color:rgba(244,63,94,.4)}
+.sn-inv-sub{display:block;font-size:11.5px;color:var(--muted);margin-top:2px}
+.sn-inv-acts{display:flex;gap:5px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end;max-width:50%}
+.sn-goal{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:12px 14px;margin-bottom:12px}
+.sn-goal-top{display:flex;justify-content:space-between;font-weight:800;font-size:13.5px;margin-bottom:8px}
+.sn-goal-pct{color:var(--gold)}
+.sn-goal-bar{height:12px;background:var(--surface2);border-radius:7px;overflow:hidden}
+.sn-goal-fill{height:100%;background:linear-gradient(90deg,#4da3ff,#3ddc97);border-radius:7px;transition:width .4s}
+.sn-goal-sub{display:block;font-size:11.5px;color:var(--muted);margin-top:7px}
+.sn-close{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:12px 14px;margin-bottom:12px}
+.sn-close-h{font-weight:800;font-size:14px;margin-bottom:10px}
+.sn-close-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.sn-close-c{background:var(--surface2);border:1px solid var(--border);border-radius:11px;padding:9px;text-align:center}
+.sn-close-c span{display:block;font-size:11px;color:var(--muted);margin-bottom:4px}
+.sn-close-c strong{font-size:14px}
 .sn-search::placeholder{color:var(--muted)}
 .sn-chips{display:flex;gap:8px;overflow-x:auto;padding-bottom:2px}
 .sn-chip{flex-shrink:0;background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:20px;padding:7px 15px;font-size:13px;font-family:inherit;cursor:pointer}
@@ -4038,6 +5025,86 @@ const CSS = `
 .sn-card-name{display:block;font-weight:700;font-size:14px}
 .sn-card-phone{display:block;font-size:11px;color:var(--muted);margin-top:1px;direction:ltr;text-align:right}
 .sn-card-status{text-align:left;flex-shrink:0}
+.sn-fin--late{background:rgba(244,63,94,.16);color:#ff9aa6;border:1px solid rgba(244,63,94,.4)}
+/* تستحق اليوم */
+.sn-due{background:var(--surface);border:1px solid var(--border);border-radius:16px;margin-bottom:14px;overflow:hidden}
+.sn-due--empty{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;font-weight:800;font-size:14px;color:var(--muted)}
+.sn-due-clear{color:var(--ok);font-weight:700;font-size:13px}
+.sn-due-head{width:100%;display:flex;align-items:center;justify-content:space-between;background:linear-gradient(135deg,rgba(79,157,255,.18),rgba(139,92,246,.14));border:none;padding:13px 15px;font-family:inherit;font-size:15px;font-weight:800;color:var(--text);cursor:pointer}
+.sn-due-count{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:22px;padding:0 6px;background:var(--bad);color:#fff;border-radius:11px;font-size:12px;margin-inline-start:6px}
+.sn-due-body{padding:10px 12px}
+.sn-due-notif{width:100%;background:rgba(255,209,102,.14);border:1px solid rgba(255,209,102,.4);color:var(--gold);border-radius:11px;padding:10px;font-family:inherit;font-weight:800;font-size:13px;cursor:pointer;margin-bottom:10px}
+.sn-due-group{margin-bottom:10px}
+.sn-due-glabel{font-size:12.5px;font-weight:800;color:var(--muted);margin-bottom:6px}
+.sn-due-item{display:flex;align-items:center;justify-content:space-between;gap:8px;background:var(--surface2);border:1px solid var(--border);border-radius:11px;padding:8px 10px;margin-bottom:6px}
+.sn-due-info{min-width:0;flex:1}
+.sn-due-name{display:block;font-weight:700;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sn-due-meta{display:block;font-size:11.5px;color:var(--muted);margin-top:1px}
+.sn-due-acts{display:flex;gap:6px;flex-shrink:0}
+.sn-due-btn{border:none;border-radius:9px;padding:7px 11px;font-family:inherit;font-size:12px;font-weight:800;cursor:pointer}
+.sn-due-btn--wa{background:rgba(37,211,102,.16);color:#4ade80;border:1px solid rgba(37,211,102,.4)}
+.sn-due-btn--go{background:var(--accent);color:#fff}
+.sn-calc-out{background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:10px}
+.sn-calc-row{display:flex;align-items:center;justify-content:space-between;font-size:14px;padding:6px 0}
+.sn-calc-total{border-top:1px solid var(--border);margin-top:4px;padding-top:10px;font-size:16px;font-weight:800;color:var(--accent)}
+/* تقويم التجديدات */
+.sn-cal-nav{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.sn-cal-nav span{font-weight:800;font-size:15px}
+.sn-cal-nav button{width:40px;height:40px;border-radius:10px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:20px;cursor:pointer}
+.sn-cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:5px}
+.sn-cal-head{margin-bottom:5px}
+.sn-cal-wd{text-align:center;font-size:10.5px;color:var(--muted);font-weight:700;padding:3px 0}
+.sn-cal-day{position:relative;aspect-ratio:1;border:1px solid var(--border);background:var(--surface2);border-radius:9px;color:var(--text);font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;font-family:inherit}
+.sn-cal-day.has{border-color:var(--bad)}
+.sn-cal-day.is-today{outline:2px solid var(--accent)}
+.sn-cal-day.is-sel{background:var(--accent);color:#fff}
+.sn-cal-badge{position:absolute;top:-5px;left:-5px;min-width:18px;height:18px;background:var(--bad);color:#fff;border-radius:9px;font-size:10px;display:flex;align-items:center;justify-content:center;padding:0 4px}
+.sn-cal-list{margin-top:14px}
+.sn-cal-list-h{font-weight:800;font-size:14px;margin-bottom:8px}
+.sn-cal-item{display:flex;justify-content:space-between;background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:9px 11px;margin-bottom:6px}
+.sn-cal-item-sub{color:var(--muted);font-size:12px}
+/* شاشة القفل */
+.sn-lock{display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}
+.sn-lock-box{text-align:center;width:100%;max-width:320px}
+.sn-lock-logo{font-size:46px;filter:drop-shadow(0 0 12px rgba(255,209,102,.6));margin-bottom:6px}
+.sn-lock-box h2{font-size:24px;font-weight:800;letter-spacing:1px}
+.sn-lock-box p{color:var(--muted);margin:4px 0 18px}
+.sn-lock-dots{display:flex;justify-content:center;gap:14px;margin-bottom:14px}
+.sn-lock-dot{width:15px;height:15px;border-radius:50%;border:2px solid var(--muted);transition:all .15s}
+.sn-lock-dot.on{background:var(--accent);border-color:var(--accent)}
+.sn-lock-err{color:var(--bad)!important;font-weight:700;margin-top:0}
+.sn-lock-pad{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:14px}
+.sn-lock-key{height:64px;border-radius:50%;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:24px;font-weight:700;cursor:pointer;font-family:inherit}
+.sn-lock-key:active{background:var(--accent);color:#fff}
+/* بطاقة مضغوطة */
+.sn-card-sub{display:block;font-size:12px;color:var(--muted);margin-top:3px;direction:ltr;text-align:right;word-break:break-all}
+.sn-dev-tag{display:inline-block;font-size:10px;font-weight:800;border:1px solid;border-radius:6px;padding:1px 6px;margin-inline-start:6px;vertical-align:middle}
+.sn-grid2v{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-bottom:10px}
+.sn-cf{background:var(--surface2);border:1px solid var(--border);border-radius:11px;padding:7px 9px;min-width:0}
+.sn-cf-k{display:block;font-size:10.5px;color:var(--muted);margin-bottom:2px}
+.sn-cf-v{display:flex;align-items:center;justify-content:space-between;gap:6px;font-size:13px;font-weight:700;min-width:0}
+.sn-cf-v>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.sn-neg{color:var(--bad)}
+.sn-copy-ic{flex-shrink:0;background:var(--surface);border:1px solid var(--border);border-radius:7px;width:24px;height:24px;font-size:12px;color:var(--accent);cursor:pointer;padding:0;line-height:1}
+.sn-copy-ic:active{background:var(--accent);color:#fff}
+.sn-collapse-h{width:100%;display:flex;align-items:center;justify-content:space-between;background:var(--surface2);border:1px solid var(--border);border-radius:11px;padding:10px 12px;font-family:inherit;font-size:13.5px;font-weight:800;color:var(--text);cursor:pointer;margin-bottom:8px}
+.sn-collapse-h:active{background:var(--surface)}
+.sn-more-box{background:var(--surface2);border:1px solid var(--border);border-radius:11px;padding:10px 12px;margin-bottom:8px}
+.sn-more-line{font-size:13px;margin-bottom:6px}
+.sn-more-notes{margin:0;padding-inline-start:18px;font-size:13px}
+.sn-more-notes li{margin-bottom:3px}
+.sn-card-actions--bar{display:flex;flex-wrap:nowrap;overflow-x:auto;gap:8px;padding-bottom:4px;-webkit-overflow-scrolling:touch}
+.sn-card-actions--bar::-webkit-scrollbar{height:0}
+.sn-quick-on{background:var(--accent)!important;border-color:transparent!important}
+/* لوحة الربح */
+.sn-profit-panel{background:var(--surface2);border:1px solid var(--border);border-radius:12px;margin:0 12px 12px;padding:10px 12px}
+.sn-profit-head{font-size:13px;font-weight:800;margin-bottom:8px;color:var(--gold)}
+.sn-profit-row{display:flex;align-items:center;gap:8px;font-size:12.5px;padding:6px 0;border-bottom:1px dashed var(--border)}
+.sn-profit-date{color:var(--muted);flex-shrink:0;font-size:11.5px}
+.sn-profit-type{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sn-profit-amt{font-weight:800;flex-shrink:0}
+.sn-pos{color:var(--ok)}
+.sn-profit-total{display:flex;align-items:center;justify-content:space-between;margin-top:8px;font-size:14px;font-weight:800}
 .sn-quick-acts{display:flex;gap:6px;margin-bottom:6px;justify-content:flex-start}
 .sn-quick-btn{width:31px;height:31px;border-radius:50%;border:1px solid var(--border);background:var(--surface2);font-size:14px;line-height:1;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;flex-shrink:0}
 .sn-quick-btn:active{background:var(--surface);transform:scale(.92)}
